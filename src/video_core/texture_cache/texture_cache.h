@@ -878,8 +878,11 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         LOG_TRACE(HW_GPU, "Invalid image view index={}", index);
         return NULL_IMAGE_VIEW_ID;
     }
+    auto& aliases =
+        compute ? channel_state->compute_offset_aliases : channel_state->graphics_offset_aliases;
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
     if (is_new) {
+        aliases.erase(index);
         if (IsValidEntry(*gpu_memory, descriptor)) {
             const auto [pair, is_new_tc] = channel_state->image_views.try_emplace(descriptor);
             if (is_new_tc) {
@@ -893,6 +896,32 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
             table.bound_ids[index] = pair->second;
             return pair->second;
         }
+        // A Switch 2 handle below the limit can still be a byte offset with flag bits
+        // (TextureHeaderOffsetIndex). When the plain index holds no descriptor and the offset's
+        // slot does, bind that slot and let the plain index follow it from now on.
+        if (gpu_memory->UsesNativeTiling() && Tegra::Texture::OffsetHandleFallbackEnabled()) {
+            if (const auto offset_index =
+                    Tegra::Texture::TextureHeaderOffsetIndex(index, table.current_limit)) {
+                Tegra::Texture::TICEntry offset_descriptor{};
+                gpu_memory->ReadBlock(table.current_gpu_addr +
+                                          *offset_index * sizeof(Tegra::Texture::TICEntry),
+                                      &offset_descriptor, sizeof(offset_descriptor));
+                if (IsValidEntry(*gpu_memory, offset_descriptor)) {
+                    static std::atomic<u32> alias_reports{};
+                    if (alias_reports.fetch_add(1, std::memory_order_relaxed) < 64) {
+                        LOG_WARNING(HW_GPU,
+                                    "Offset texture handle: index={:#x} bound as {:#x} limit={:#x} "
+                                    "pool={:#x}",
+                                    index, *offset_index, table.current_limit,
+                                    table.current_gpu_addr);
+                    }
+                    aliases[index] = *offset_index;
+                    const ImageViewId id = VisitImageView(*offset_index, compute);
+                    table.bound_ids[index] = id;
+                    return id;
+                }
+            }
+        }
         table.bound_ids[index] = NULL_IMAGE_VIEW_ID;
         static std::atomic<u32> invalid_reports{};
         if (invalid_reports.fetch_add(1, std::memory_order_relaxed) < 64) {
@@ -903,6 +932,11 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
                       descriptor.raw[2], descriptor.raw[3]);
         }
         return NULL_IMAGE_VIEW_ID;
+    }
+    if (const auto alias = aliases.find(index); alias != aliases.end()) {
+        const ImageViewId id = VisitImageView(alias->second, compute);
+        table.bound_ids[index] = id;
+        return id;
     }
     const auto id = table.bound_ids[index];
     if (id != NULL_IMAGE_VIEW_ID)

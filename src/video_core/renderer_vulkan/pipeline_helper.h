@@ -411,7 +411,8 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
 /// Whether a pipeline using a shader with this hash is built with
 /// VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT. AMD's proprietary compiler crashes or spends
 /// minutes on a few shaders it builds in seconds unoptimized. EDEN_NX2_NOOPT_SHADERS=<hash>,...
-/// adds hashes on any driver ("all" for every pipeline), to look for new ones.
+/// adds hashes on any driver ("all" for every pipeline), to look for new ones; "none" skips the
+/// built-in list.
 inline bool BuildsUnoptimized(const Device& device, u64 shader_hash) {
     // The Legend of Zelda: Ocarina of Time (0400486024DEC000), driver 2.0.353 on an RX 6600 XT
     static constexpr std::array<u64, 3> amd_proprietary{
@@ -421,6 +422,7 @@ inline bool BuildsUnoptimized(const Device& device, u64 shader_hash) {
     };
     struct Forced {
         bool all = false;
+        bool none = false; // "none": skip the built-in list, to A/B a driver that no longer needs it
         std::vector<u64> hashes;
     };
     static const Forced forced = [] {
@@ -429,6 +431,10 @@ inline bool BuildsUnoptimized(const Device& device, u64 shader_hash) {
         const std::string_view text = value != nullptr ? value : "";
         if (text == "all") {
             result.all = true;
+            return result;
+        }
+        if (text == "none") {
+            result.none = true;
             return result;
         }
         // Comma-separated hexadecimal hashes, in either case.
@@ -447,6 +453,9 @@ inline bool BuildsUnoptimized(const Device& device, u64 shader_hash) {
     }();
     if (forced.all || std::ranges::find(forced.hashes, shader_hash) != forced.hashes.end()) {
         return true;
+    }
+    if (forced.none) {
+        return false;
     }
     return device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY &&
            std::ranges::find(amd_proprietary, shader_hash) != amd_proprietary.end();

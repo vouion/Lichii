@@ -35,3 +35,13 @@ TEST_CASE("Resolved texture indices stay unchanged for both memory layouts",
         REQUIRE(TextureHeaderIndex(maximum, 63, native_tiling) == maximum);
     }
 }
+
+TEST_CASE("Native handles below the limit have an offset reading to fall back to",
+          "[video_core][texture_header_index]") {
+    using Tegra::Texture::TextureHeaderOffsetIndex;
+    // Ocarina of Time's unwritten slots 0x4f00 and 0x5b02 (flag bits) of a 33067-entry pool.
+    REQUIRE(TextureHeaderOffsetIndex(0x4f00, 33067) == 632);
+    REQUIRE(TextureHeaderOffsetIndex(0x5b02, 33067) == 728);
+    REQUIRE_FALSE(TextureHeaderOffsetIndex(5, 33067).has_value());
+    REQUIRE_FALSE(TextureHeaderOffsetIndex(2048, 63).has_value());
+}

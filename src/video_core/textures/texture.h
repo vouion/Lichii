@@ -7,6 +7,8 @@
 #pragma once
 
 #include <array>
+#include <cstdlib>
+#include <optional>
 #include "common/assert.h"
 #include "common/bit_field.h"
 #include "common/common_types.h"
@@ -174,6 +176,26 @@ static_assert(sizeof(TextureHandle) == 4, "TextureHandle has wrong size");
         return index / 32;
     }
     return index;
+}
+
+/// EDEN_NX2_HANDLE_OFFSET=0 turns the offset fallback below off (bisect switch).
+[[nodiscard]] inline bool OffsetHandleFallbackEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_HANDLE_OFFSET");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+/// A Switch 2 handle below the pool limit can still be a byte offset, index * 32 with sampler
+/// flag bits in the low five bits: Ocarina of Time binds slots 0x4f00 and 0x5b02 of a 33067-entry
+/// pool, both unwritten, while 0x4f00 / 32 and 0x5b02 / 32 hold real descriptors. The plain index
+/// is read first; this is the offset reading to try when that entry is unbound.
+[[nodiscard]] constexpr std::optional<u32> TextureHeaderOffsetIndex(u32 index, u32 limit) {
+    if (index < 32 || index / 32 > limit) {
+        return std::nullopt;
+    }
+    return index / 32;
 }
 
 struct TICEntry {

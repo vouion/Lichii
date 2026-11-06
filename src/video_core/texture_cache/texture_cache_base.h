@@ -88,6 +88,9 @@ public:
     DescriptorTable<TICEntry, ImageViewId> graphics_image_table;
     DescriptorTable<TSCEntry, SamplerId> graphics_sampler_table;
     DescriptorTable<TICEntry, ImageViewId> compute_image_table;
+    /// Plain indices bound through TextureHeaderOffsetIndex: index -> the slot it follows.
+    std::unordered_map<u32, u32> graphics_offset_aliases;
+    std::unordered_map<u32, u32> compute_offset_aliases;
     DescriptorTable<TSCEntry, SamplerId> compute_sampler_table;
 
     // TODO: still relies on bad iterators :(

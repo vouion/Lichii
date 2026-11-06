@@ -418,6 +418,29 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
         }
     }
     gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
+    // The same offset reading the texture cache binds (VisitImageView): keep the baked type and
+    // format consistent with the view the draw will get.
+    if (entry.format.Value() == Tegra::Texture::TextureFormat{} && gpu_memory->UsesNativeTiling() &&
+        Tegra::Texture::OffsetHandleFallbackEnabled()) {
+        if (const auto offset_index = Tegra::Texture::TextureHeaderOffsetIndex(index, tic_limit)) {
+            const GPUVAddr offset_addr{tic_addr + *offset_index * sizeof(entry)};
+            Tegra::Texture::TICEntry offset_entry{};
+            if (gpu_memory->IsFullyMappedRange(offset_addr, sizeof(offset_entry))) {
+                gpu_memory->ReadBlock(offset_addr, &offset_entry, sizeof(offset_entry));
+                if (offset_entry.format.Value() != Tegra::Texture::TextureFormat{}) {
+                    static std::atomic<u32> alias_reports{};
+                    if (alias_reports.fetch_add(1, std::memory_order_relaxed) < 64) {
+                        LOG_WARNING(HW_GPU,
+                                    "Offset shader TIC: program={:#x} stage={} raw={:#x} index={} "
+                                    "read as {} limit={}",
+                                    program_base, static_cast<u32>(stage), raw, index,
+                                    *offset_index, tic_limit);
+                    }
+                    return offset_entry;
+                }
+            }
+        }
+    }
     if (entry.format.Value() == Tegra::Texture::TextureFormat{} &&
         std::getenv("EDEN_NX2_RENDER_TRACE")) {
         static std::atomic<u32> traces{};
