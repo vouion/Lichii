@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -13,6 +14,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/memory.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/command_fetch_order.h"
@@ -132,8 +134,10 @@ bool DmaPusher::Step() {
         }
         // A queued writer may not have marked its destination pages yet. Execute all queued
         // writers before consulting that bitmap or fetching command words, including writers
-        // queued after the last host sync.
-        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+        // queued after the last host sync. EDEN_NX2_LIST_FAST=1 skips the wait once no page was
+        // newly GPU-written for 2 s (SkipWriterWait), =2 checks each skipped entry on the back.
+        if (auto& split = VideoCommon::GpuSplit::Get();
+            split.Active() && !SkipWriterWait(u64{header.size} * sizeof(u32))) {
             split.WaitForWriters();
         }
         bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get,
@@ -489,10 +493,14 @@ void DmaPusher::CallMethod(u32 argument) {
                             (dma_state.method >= MacroRegistersStart ||
                              (dma_state.method < subchannel->execution_mask.size() &&
                               subchannel->execution_mask[dma_state.method]));
+        const bool memory_writer = engine_type == Engines::EngineTypes::KeplerMemory ||
+                                   engine_type == Engines::EngineTypes::Fermi2D;
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
                 split.NoteAnyRelease();
+            } else if (memory_writer) {
+                split.NoteMemoryWriter();
             }
         };
         if (split.Active()) {
@@ -560,10 +568,14 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
                 }
             }
         }
+        const bool memory_writer = engine_type == Engines::EngineTypes::KeplerMemory ||
+                                   engine_type == Engines::EngineTypes::Fermi2D;
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
                 split.NoteAnyRelease();
+            } else if (memory_writer) {
+                split.NoteMemoryWriter();
             }
         };
         if (split.Active()) {
@@ -625,6 +637,48 @@ void DmaPusher::RefreshDeferredEntries(CommandList& list) {
                                        entry.size * sizeof(u32));
     }
     list.deferred_entries.clear();
+}
+
+bool DmaPusher::SkipWriterWait(u64 size) {
+    const int mode = VideoCore::Nx2Debug::g_list_fast.load(std::memory_order_relaxed);
+    if (mode == 0) {
+        return false;
+    }
+    // The wait only finds a list page a queued dispatch or copy writes for the first time: once
+    // no page has been newly written for a while, the set of written pages is taken as settled.
+    const u64 marks = Tegra::g_nx2_new_written_pages.load(std::memory_order_relaxed);
+    const auto now = std::chrono::steady_clock::now();
+    if (marks != list_fast_marks) {
+        list_fast_marks = marks;
+        list_fast_since = now;
+        return false;
+    }
+    if (now - list_fast_since < std::chrono::seconds{2}) {
+        return false;
+    }
+    if (mode == 2) {
+        const GPUVAddr address = dma_state.dma_get;
+        auto* const memory = &memory_manager;
+        VideoCommon::GpuSplit::Get().Defer([memory, address, size] {
+            static std::atomic<u64> checks{};
+            static std::atomic<u64> misses{};
+            bool written = false;
+            for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size;
+                 page += 0x1000) {
+                const auto device = memory->GpuToCpuAddress(page);
+                written |= device && Tegra::Nx2IsGpuWritten(*device);
+            }
+            const u64 count = checks.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (written && misses.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_WARNING(HW_GPU, "List fast check: entry at {:#x} became GPU-written", address);
+            }
+            if ((count & 0xffff) == 0) {
+                LOG_INFO(HW_GPU, "List fast check: {} entries, {} misses", count,
+                         misses.load(std::memory_order_relaxed));
+            }
+        });
+    }
+    return true;
 }
 
 bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) {
