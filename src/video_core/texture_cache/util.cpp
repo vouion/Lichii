@@ -841,6 +841,24 @@ bool IsValidEntry(const Tegra::MemoryManager& gpu_memory, const TICEntry& config
     if (address == 0) {
         return false;
     }
+    if (config.format.Value() == Tegra::Texture::TextureFormat{}) {
+        // An entry the game never wrote (a TIC table being rewritten at gameplay start, or a
+        // handle parsed past its table). Its format is not decodable: binding it would feed the
+        // zero format to the format lookup through ImageInfo/ImageViewInfo and build a bogus
+        // image out of its garbage dimensions. Sampling it is undefined on hardware; the null
+        // view stands in for it like for an entry with no address.
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_WARNING(HW_GPU,
+                        "Unbound TIC (format=0) rejected: address={:#x} size={}x{}x{} header={} "
+                        "type={} raw={:016x}/{:016x}/{:016x}/{:016x}",
+                        address, config.Width(), config.Height(), config.Depth(),
+                        static_cast<u32>(config.header_version.Value()),
+                        static_cast<u32>(config.texture_type.Value()), config.raw[0], config.raw[1],
+                        config.raw[2], config.raw[3]);
+        }
+        return false;
+    }
     if (address >= (1ULL << 40)) {
         return false;
     }
