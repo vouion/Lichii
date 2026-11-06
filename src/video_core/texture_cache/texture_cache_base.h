@@ -100,6 +100,10 @@ public:
 
 template <class P>
 class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelInfo> {
+    /// Test peer (src/tests/video_core/clear_ordering_harness.cpp): drives the copy paths and
+    /// image creation directly to pin their deferred-clear ordering without a GPU.
+    friend struct TextureCacheTestPeer;
+
     /// Address shift for caching images into a hash table
     static constexpr u64 YUZU_PAGEBITS = 20;
 

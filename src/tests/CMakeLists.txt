@@ -50,6 +50,10 @@ add_executable(tests
     video_core/maxwell_permute_lod.cpp
     video_core/submission_policy.cpp
     video_core/framebuffer_clear_layers.cpp
+    video_core/clear_ordering_harness.cpp
+    video_core/texture_cache_test_context.h
+    video_core/tic_binding_limits.cpp
+    video_core/format_lookup_unusual.cpp
     video_core/fire_emblem_upscale.cpp
     video_core/dlss_contract.cpp
     video_core/ampere_fast_fusion.cpp

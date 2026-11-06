@@ -56,7 +56,25 @@ PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, 
         }
         return PixelFormat::A8B8G8R8_UNORM;
     }
-    switch (Hash(format, red, green, blue, alpha, is_srgb)) {
+    // SNORM_FORCE_FP16/UNORM_FORCE_FP16 hold SNORM/UNORM data sampled rounded to FP16
+    // (sw_blitter/converter.cpp): the stored layout is the base type's. X8B8G8R8 is A8B8G8R8
+    // with an unused alpha. Left unmapped, both fell through to the unimplemented fallback and
+    // decoded as A8B8G8R8_UNORM - wrong channels and bytes per block for the fog LUTs, water
+    // ripples and canopy lightmaps that use them (green wash, sparkle flecks).
+    const auto base_component = [](ComponentType component) {
+        switch (component) {
+        case ComponentType::SNORM_FORCE_FP16:
+            return ComponentType::SNORM;
+        case ComponentType::UNORM_FORCE_FP16:
+            return ComponentType::UNORM;
+        default:
+            return component;
+        }
+    };
+    const TextureFormat base_format =
+        format == TextureFormat::X8B8G8R8 ? TextureFormat::A8B8G8R8 : format;
+    switch (Hash(base_format, base_component(red), base_component(green), base_component(blue),
+                 base_component(alpha), is_srgb)) {
     case Hash(TextureFormat::A8B8G8R8, UNORM):
         return PixelFormat::A8B8G8R8_UNORM;
     case Hash(TextureFormat::A8B8G8R8, SNORM):
