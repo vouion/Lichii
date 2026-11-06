@@ -60,6 +60,12 @@ struct WordManager {
     }
     explicit WordManager() = default;
 
+    /// PR #161's whole-manager upload check, over the clean words: a pending upload exists when
+    /// any word holds a CPU or Untracked page. O(1), and cannot drift from the walk itself.
+    [[nodiscard]] bool HasPendingUpload() const noexcept {
+        return DirtyWords(0, num_words - 1) != 0;
+    }
+
     static u64 ExtractBits(u64 word, size_t page_start, size_t page_end) {
         constexpr size_t number_bits = sizeof(u64) * 8;
         const size_t limit_page_end = number_bits - (std::min)(page_end, number_bits);
@@ -165,6 +171,9 @@ struct WordManager {
     template <typename Func>
     void ForEachModifiedRange(Type type, bool clear, VAddr query_cpu_range, s64 size, Func&& func) {
         //static_assert(type != Type::Untracked);
+        if (type == Type::CPU && !HasPendingUpload()) {
+            return;
+        }
         std::span<u64> state_words = Span(type);
         std::span<u64> untracked_words = Span(Type::Untracked);
         std::span<u64> cached_words = Span(Type::CachedCPU);

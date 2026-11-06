@@ -119,12 +119,20 @@ public:
     void RequestOutsideRenderPassOperationContext(
         std::source_location location = std::source_location::current());
 
+    /// Defers a fragment barrier until a subsequent draw in the active render pass depends on it.
     void DeferFragmentBarrier() {
         fragment_barrier.Defer(state.renderpass != VK_NULL_HANDLE);
     }
 
-    bool HasFragmentBarrier() const {
+    /// Returns true if a deferred fragment barrier is currently pending on the active render pass.
+    [[nodiscard]] bool HasFragmentBarrier() const noexcept {
         return fragment_barrier.Pending();
+    }
+
+    /// Clears and returns the pending deferred fragment barrier state.
+    bool TakeFragmentBarrier() {
+        return fragment_barrier.Take();
+    }
     }
 
     void NoteRenderPassStores() {
