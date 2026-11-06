@@ -129,12 +129,6 @@ public:
         return fragment_barrier.Pending();
     }
 
-    /// Clears and returns the pending deferred fragment barrier state.
-    bool TakeFragmentBarrier() {
-        return fragment_barrier.Take();
-    }
-    }
-
     void NoteRenderPassStores() {
         render_pass_has_stores = true;
     }

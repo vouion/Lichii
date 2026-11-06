@@ -301,8 +301,6 @@ private:
     alignas(128) std::atomic<bool> front_waiting{};
     std::atomic<u32> front_wake{};
     std::jthread back_thread;
-    alignas(128) std::atomic<bool> front_waiting{};
-    std::atomic<u32> front_wake{};
 };
 
 } // namespace VideoCommon

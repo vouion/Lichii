@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -679,15 +680,10 @@ void Maxwell3D::CallMethodSlow(Core::System& system, u32 method, u32 method_argu
         }
         return;
     }
-    if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) {
-        draw_manager.DrawDeferred(*this, true);
-    }
-    if (!SkipSameValueWrites() || regs.reg_array[method] != argument) {
-        regs.reg_array[method] = argument;
-        for (auto const& table : dirty.tables) {
-            dirty.flags[table[method]] = true;
-        }
-    }
+    // Masked methods always write and mark dirty, like CallMethodFast (they are few and carry
+    // side effects). PR #161 skips same-value writes here too in its own tree; it cannot be
+    // taken alone: the fast path would diverge (maxwell_fast_method equivalence tests).
+    ProcessDirtyRegisters(method, argument);
     ProcessMethodCall(method, argument, method_argument, is_last_call);
 }
 
@@ -1389,8 +1385,17 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     VideoCommon::Nx2Profile::CountDmaRead(macro);
-    if (VideoCommon::QueryDma::TraceEnabled()) {
+    // perf9's full drain/flush path stays the default (#184 kept it deliberately). With
+    // EDEN_NX2_MME_LIGHT_DRAIN=1, PR #161's lighter path: wait for the writers and semaphores
+    // that can produce this payload, and drain/flush only when the pages hold GPU-written data.
+    static const bool light_drain = std::getenv("EDEN_NX2_MME_LIGHT_DRAIN") != nullptr;
+    if (!light_drain) {
         split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+    }
+    if (VideoCommon::QueryDma::TraceEnabled()) {
+        if (light_drain) {
+            split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+        }
         split.Run(
             [this, macro, method, source, read_bytes] {
                 if (VideoCommon::QueryDma::HasPendingQueries(memory_manager, *rasterizer, source,
@@ -1400,7 +1405,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
                 }
             },
             VideoCommon::DrainSite::MacroDmaFlush);
-    } else {
+    } else if (light_drain) {
         // Writers after the last host sync can still produce this payload and its page marks.
         split.WaitForWriters(VideoCommon::DrainSite::MacroDmaRead);
         split.WaitForSemaphore(source, VideoCommon::DrainSite::MacroDmaRead);
@@ -1416,8 +1421,10 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     if (VideoCommon::Nx2Profile::Enabled()) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);
     }
-    if (gpu_written) {
-        split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+    if (!light_drain || gpu_written) {
+        if (light_drain) {
+            split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+        }
         if (memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
             split.Run(
                 [memory = &memory_manager, source, read_bytes] {

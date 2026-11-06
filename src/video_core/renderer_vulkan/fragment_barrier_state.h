@@ -15,13 +15,6 @@ public:
         return pending;
     }
 
-    /// Clears the pending state and returns whether it was set.
-    bool Take() {
-        const bool was = pending;
-        pending = false;
-        return was;
-    }
-
     void Reset() {
         pending = false;
     }
