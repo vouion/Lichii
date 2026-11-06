@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <boost/container/static_vector.hpp>
 
 #include "common/settings.h"
@@ -397,12 +398,32 @@ Id BitTest(EmitContext& ctx, Id mask, Id bit) {
     return ctx.OpINotEqual(ctx.U1, bit_value, ctx.u32_zero_value);
 }
 
+/// EDEN_NX2_GATHER_NUDGE=<texels> overrides the 1/512 texel gather offset applied on AMD, Intel
+/// and Qualcomm (0 turns it off, negative values flip it), to A/B texel selection at the exact
+/// half-texel positions Ocarina of Time's impostor atlases are gathered at.
+[[nodiscard]] float GatherNudgeTexels() {
+    static const float texels = [] {
+        const char* const value = std::getenv("EDEN_NX2_GATHER_NUDGE");
+        if (value == nullptr) {
+            return 0x1p-9f;
+        }
+        char* end{};
+        const double parsed = std::strtod(value, &end);
+        return end != value ? static_cast<float>(parsed) : 0x1p-9f;
+    }();
+    return texels;
+}
+
 Id ImageGatherSubpixelOffset(EmitContext& ctx, const IR::TextureInstInfo& info, Id texture,
                              Id coords) {
     // Apply a subpixel offset of 1/512 the texel size of the texture to ensure same rounding on
     // AMD hardware as on Maxwell or other Nvidia architectures.
+    const float nudge_texels{GatherNudgeTexels()};
+    if (nudge_texels == 0.0f) {
+        return coords;
+    }
     const auto calculate_coords{[&](size_t dim) {
-        const Id nudge{ctx.Const(0x1p-9f)};
+        const Id nudge{ctx.Const(nudge_texels)};
         const Id image_size{ctx.OpImageQuerySizeLod(ctx.U32[dim], texture, ctx.u32_zero_value)};
         Id offset{dim == 2 ? ctx.ConstantComposite(ctx.F32[dim], nudge, nudge)
                            : ctx.ConstantComposite(ctx.F32[dim], nudge, nudge, ctx.f32_zero_value)};
