@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <string>
 #include <numeric>
@@ -48,7 +49,8 @@ namespace VideoCommon {
 
 /// EDEN_NX2_IMAGE_TRACE=<gpu address>[,...]: log every upload, copy, alias sync, blit, DMA write,
 /// join and delete that touches an image covering one of these addresses (up to
-/// EDEN_NX2_IMAGE_TRACE_LIMIT lines, default 4000).
+/// EDEN_NX2_IMAGE_TRACE_LIMIT lines, default 4000). EDEN_NX2_IMAGE_TRACE_SHAPE=<w>x<h>[x<layers>]
+/// selects images by size instead, for targets whose address changes between boots.
 [[nodiscard]] inline bool ImageTraced(const ImageBase& image) {
     static const std::vector<GPUVAddr> addresses = [] {
         std::vector<GPUVAddr> list;
@@ -65,7 +67,21 @@ namespace VideoCommon {
         }
         return list;
     }();
-    if (addresses.empty()) {
+    static const std::array<u32, 3> shape = [] {
+        std::array<u32, 3> value{};
+        if (const char* text = std::getenv("EDEN_NX2_IMAGE_TRACE_SHAPE")) {
+            char* end = nullptr;
+            value[0] = static_cast<u32>(std::strtoul(text, &end, 10));
+            if (*end == 'x') {
+                value[1] = static_cast<u32>(std::strtoul(end + 1, &end, 10));
+            }
+            if (*end == 'x') {
+                value[2] = static_cast<u32>(std::strtoul(end + 1, &end, 10));
+            }
+        }
+        return value;
+    }();
+    if (addresses.empty() && shape[0] == 0) {
         return false;
     }
     static const u64 limit = [] {
@@ -73,6 +89,10 @@ namespace VideoCommon {
         return value != nullptr ? std::strtoull(value, nullptr, 10) : 4000ULL;
     }();
     static std::atomic<u64> lines{};
+    if (shape[0] != 0 && image.info.size.width == shape[0] && image.info.size.height == shape[1] &&
+        (shape[2] == 0 || static_cast<u32>(image.info.resources.layers) == shape[2])) {
+        return lines.fetch_add(1, std::memory_order_relaxed) < limit;
+    }
     for (const GPUVAddr address : addresses) {
         if (address >= image.gpu_addr && address < image.gpu_addr + image.guest_size_bytes) {
             return lines.fetch_add(1, std::memory_order_relaxed) < limit;
