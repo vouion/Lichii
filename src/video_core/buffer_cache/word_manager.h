@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <bit>
 #include <limits>
 #include <span>
@@ -23,6 +24,19 @@
 #include "video_core/nx2_perf.h"
 
 namespace VideoCommon {
+
+/// EDEN_NX2_UPLOAD_SKIP=1 restores the clean-word shortcuts that skip the upload walk when a
+/// word manager reads as clean. Off by default: the clean bits are updated by read-modify-write
+/// from the guest thread's write marking and the GPU thread's clearing without atomics, and a
+/// lost update parks a dirty word as clean for good, so per-frame CPU-written data (Ocarina of
+/// Time's hearts and dialogue panel) draws from stale host bytes and blinks.
+[[nodiscard]] inline bool UploadSkipEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_UPLOAD_SKIP");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
 
 constexpr u64 PAGES_PER_WORD = 64;
 constexpr u64 BYTES_PER_PAGE = Core::DEVICE_PAGESIZE;
@@ -171,7 +185,7 @@ struct WordManager {
     template <typename Func>
     void ForEachModifiedRange(Type type, bool clear, VAddr query_cpu_range, s64 size, Func&& func) {
         //static_assert(type != Type::Untracked);
-        if (type == Type::CPU && !HasPendingUpload()) {
+        if (UploadSkipEnabled() && type == Type::CPU && !HasPendingUpload()) {
             return;
         }
         std::span<u64> state_words = Span(type);

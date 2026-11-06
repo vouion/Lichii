@@ -2395,7 +2395,7 @@ void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
 
 template <class P>
 bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size) {
-    if (!memory_tracker.HasPendingCpuUpload(device_addr, size)) {
+    if (UploadSkipEnabled() && !memory_tracker.HasPendingCpuUpload(device_addr, size)) {
         return true;
     }
     // An upload over a clean word of the tracker (word_manager.h) finds and changes nothing:
