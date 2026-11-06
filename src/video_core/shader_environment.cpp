@@ -68,6 +68,10 @@ static u64 MakeIndirectCbufKey(u32 index, u32 offset, u32 indirect) {
 }
 
 static Shader::TextureType ConvertTextureType(const Tegra::Texture::TICEntry& entry) {
+    if (entry.format.Value() == Tegra::Texture::TextureFormat{}) {
+        // An invalid descriptor: assume an ordinary 2D texture, as the untracked-handle path does.
+        return Shader::TextureType::Color2D;
+    }
     switch (entry.texture_type) {
     case Tegra::Texture::TextureType::Texture1D:
         return Shader::TextureType::Color1D;
@@ -385,9 +389,25 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
                                                        gpu_memory->UsesNativeTiling())};
-    ASSERT(index <= tic_limit);
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
-    Tegra::Texture::TICEntry entry;
+    Tegra::Texture::TICEntry entry{};
+    // A handle whose value is not yet settled at translation time (issue #101's garbage TICs)
+    // indexes past the table or into unwritten pool pages, which read as zero. Keep the invalid
+    // descriptor zeroed and let the converters fall back to an ordinary 2D texture, the same
+    // treatment the runtime gives an unresolved index (a NULL image view), instead of reading
+    // past the table or asserting on untrusted handle-derived state.
+    if (index > tic_limit ||
+        !gpu_memory->IsFullyMappedRange(descriptor_addr, sizeof(entry))) {
+        static std::atomic<u32> reports{};
+        if (reports.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_ERROR(HW_GPU,
+                      "Unresolved shader TIC: program={:#x} stage={} raw={:#x} index={} "
+                      "limit={} descriptor={:#x}",
+                      program_base, static_cast<u32>(stage), raw, index, tic_limit,
+                      descriptor_addr);
+        }
+        return entry;
+    }
     gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
     if (entry.format.Value() == Tegra::Texture::TextureFormat{} &&
         std::getenv("EDEN_NX2_RENDER_TRACE")) {

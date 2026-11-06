@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "video_core/texture_cache/format_lookup_table.h"
@@ -44,6 +45,17 @@ constexpr u32 Hash(TextureFormat format, ComponentType component, bool is_srgb =
 PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, ComponentType green,
                                        ComponentType blue, ComponentType alpha,
                                        bool is_srgb) noexcept {
+    if (format == TextureFormat{}) {
+        // An invalid (zeroed or garbage) descriptor, not an unimplemented format: fall back to
+        // the default the unimplemented path returns without asserting on every lookup.
+        static std::atomic<u32> reports{};
+        if (reports.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_ERROR(HW_GPU, "Invalid texture descriptor: srgb={} components={{{} {} {} {}}}",
+                      is_srgb, static_cast<int>(red), static_cast<int>(green),
+                      static_cast<int>(blue), static_cast<int>(alpha));
+        }
+        return PixelFormat::A8B8G8R8_UNORM;
+    }
     switch (Hash(format, red, green, blue, alpha, is_srgb)) {
     case Hash(TextureFormat::A8B8G8R8, UNORM):
         return PixelFormat::A8B8G8R8_UNORM;
