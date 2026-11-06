@@ -94,6 +94,12 @@ TOOLS = [
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 600},
                 "manifest_lines": {"type": "integer", "minimum": 0, "maximum": 5000},
                 "index": {"type": "boolean"},
+                "frames": {"type": "integer", "minimum": 1, "maximum": 16,
+                           "description": "Consecutive frames in one manifest, split by "
+                                          "kind: frame lines"},
+                "max_image_mib": {"type": "integer", "minimum": 0, "maximum": 4096,
+                                  "description": "Skip images above this size so late passes "
+                                                 "fit under the 2 GiB cap"},
             },
         },
     },

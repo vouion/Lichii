@@ -168,7 +168,7 @@ default. The service turns it on at boot. A call without `after` returns the new
 it with `SetGlobalFilter` (`logging.cpp:449`), the call the Qt settings dialog makes. Lines
 already filtered out were never formatted, so the new filter applies only to later lines.
 
-**`capture_frame`** `{sampled?, buffers?, timeout_s?, manifest_lines?, index?}`. It reuses
+**`capture_frame`** `{sampled?, buffers?, frames?, max_image_mib?, timeout_s?, manifest_lines?, index?}`. It reuses
 `FrameDump`. `FrameDump::Arm` (`vk_frame_dump.cpp:268`) points the next capture at a fresh directory and resets
 the per-capture counters, so `EDEN_NX2_FRAME_DUMP` is not needed. When to capture is decided by
 `FrameDumpSchedule`, which has no Vulkan state and is unit-tested. It handles both the env
@@ -186,7 +186,13 @@ textures and buffers. At runtime they are separate, so diffing a constant buffer
 (`vk_frame_dump.cpp:849`) starts the capture exactly as `capture.now` would. The writer thread
 reports completion after it writes the manifest summary (`WriterLoop`, `vk_frame_dump.cpp:710`). The tool returns the directory, the
 frame and summary lines, counts per entry kind, the first entries, and the `frame_dump_index.py`
-command. With `index: true`, the adapter runs that command itself. The adapter-only
+command. With `index: true`, the adapter runs that command itself. `frames: N` keeps
+capturing for N consecutive presents into the same manifest; each frame after the first adds a
+`kind: frame` line with `first_pass`, `first_draw` and `first_dispatch`, which split the entries
+by frame whatever order the writer reaches them in (per-frame dedup of buffers and dispatch
+textures restarts at each frame). `max_image_mib: M` skips every image above M MiB with a
+`skipped: size` line, so a capture at 2x docked reaches the UI passes and the present source
+instead of stopping at the 2 GiB cap on the 5120x2880 HDR targets. The adapter-only
 `capture_image {directory, name}` returns one pass PNG as image content.
 
 **`sample`** `{threads?, seconds?, max_chars?}`. The in-process sampling profiler

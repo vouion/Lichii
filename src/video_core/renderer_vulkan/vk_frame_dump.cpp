@@ -265,13 +265,15 @@ void FrameDump::StopWriter() {
     stop_writer = false;
 }
 
-void FrameDump::Arm(std::filesystem::path directory_, bool sampled, bool buffers, u64 id) {
-    if (!schedule.Arm(sampled, buffers, id)) {
+void FrameDump::Arm(std::filesystem::path directory_, bool sampled, bool buffers, u64 id,
+                    u32 frames, u64 max_image_bytes_) {
+    if (!schedule.Arm(sampled, buffers, id, frames)) {
         VideoCore::Nx2Debug::FinishCapture(id, {.error = "another capture is in progress"});
         return;
     }
     StopWriter();
     directory = std::move(directory_);
+    max_image_bytes = static_cast<size_t>(max_image_bytes_);
     truncated = false;
     recorded_bytes = 0;
     written_bytes = 0;
@@ -574,6 +576,11 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
         return false;
     }
     const size_t size = size_t{target.width} * target.height * target.depth * TexelBytes(target);
+    if (max_image_bytes != 0 && size > max_image_bytes) {
+        Enqueue({.tags = fmt::format(R"({{"name":"{}",{},"skipped":"size","bytes":{}}})", name,
+                                     tags, size)});
+        return false;
+    }
     if (recorded_bytes + size > SIZE_CAP) {
         truncated = true;
         return false;
@@ -860,6 +867,16 @@ void FrameDump::TickFrame() {
                  .summary = true,
                  .truncated = truncated});
         return;
+    case FrameDumpSchedule::Step::Next:
+        // The frame line carries the counters so entries can be split by frame whatever order
+        // the writer thread reaches them in.
+        EndPass();
+        dispatch_sampled.clear();
+        seen_buffers.clear();
+        Enqueue({.tags = fmt::format(
+                     R"({{"kind":"frame","frame":{},"seconds":{:.3f},"first_pass":{},"first_draw":{},"first_dispatch":{}}})",
+                     schedule.Frame(), elapsed, pass_index, draws, dispatches)});
+        return;
     case FrameDumpSchedule::Step::Start:
         break;
     }
@@ -897,7 +914,7 @@ void FrameDumpSchedule::Configure(std::string_view at, std::filesystem::path tri
     }
 }
 
-bool FrameDumpSchedule::Arm(bool sampled_, bool buffers_, u64 id) {
+bool FrameDumpSchedule::Arm(bool sampled_, bool buffers_, u64 id, u32 frames) {
     if (capturing) {
         return false;
     }
@@ -905,6 +922,7 @@ bool FrameDumpSchedule::Arm(bool sampled_, bool buffers_, u64 id) {
     done = false;
     sampled = sampled_;
     buffers = buffers_;
+    frames_left = (std::max)(frames, 1u);
     trigger_frame = 0;
     capture_id = id;
     return true;
@@ -916,6 +934,9 @@ FrameDumpSchedule::Step FrameDumpSchedule::Tick(double elapsed_seconds) {
     }
     ++frame;
     if (capturing) {
+        if (--frames_left > 0) {
+            return Step::Next;
+        }
         SetCapturing(false);
         done = true;
         return Step::Finish;
@@ -926,6 +947,7 @@ FrameDumpSchedule::Step FrameDumpSchedule::Tick(double elapsed_seconds) {
          !std::filesystem::exists(trigger_file, error))) {
         return Step::None;
     }
+    frames_left = (std::max)(frames_left, 1u);
     SetCapturing(true);
     return Step::Start;
 }

@@ -34,15 +34,16 @@ class Scheduler;
 /// Vulkan side so it can be tested on its own.
 class FrameDumpSchedule {
 public:
-    enum class Step { None, Start, Finish };
+    /// Next: the capture continues with another frame.
+    enum class Step { None, Start, Next, Finish };
 
     /// EDEN_NX2_FRAME_DUMP_AT: seconds after boot ("45"), a frame number ("2700f"), or "file" to
     /// capture once `trigger_file` exists. EDEN_NX2_FRAME_DUMP_SAMPLED reads back both the
     /// sampled textures and the bound buffers.
     void Configure(std::string_view at, std::filesystem::path trigger_file, bool sampled);
-    /// Captures the next frame for the debug server, which is told `id`. False while a capture
-    /// runs.
-    bool Arm(bool sampled, bool buffers, u64 id);
+    /// Captures the next `frames` frames for the debug server, which is told `id`. False while a
+    /// capture runs.
+    bool Arm(bool sampled, bool buffers, u64 id, u32 frames);
     /// Once per presented frame: whether a capture starts with the next frame or has ended.
     Step Tick(double elapsed_seconds);
     /// The capture Tick started could not begin.
@@ -74,6 +75,7 @@ private:
     bool buffers{};
     bool capturing{};
     bool done{};
+    u32 frames_left{1};
     std::filesystem::path trigger_file;
     u64 trigger_frame{~0ULL};
     double trigger_seconds{std::numeric_limits<double>::infinity()};
@@ -161,9 +163,11 @@ public:
     /// Waits for pending readbacks and writes them once they pass the staging budget.
     void DrainIfFull();
     void TickFrame();
-    /// Captures the next frame into `directory` for the debug server, which is told `id` once
-    /// the manifest is complete. Works without EDEN_NX2_FRAME_DUMP.
-    void Arm(std::filesystem::path directory, bool sampled, bool buffers, u64 id);
+    /// Captures the next `frames` frames into `directory` for the debug server, which is told
+    /// `id` once the manifest is complete. Works without EDEN_NX2_FRAME_DUMP. Images larger than
+    /// `max_image_bytes` (0: no limit) are skipped with a `skipped: size` manifest line.
+    void Arm(std::filesystem::path directory, bool sampled, bool buffers, u64 id, u32 frames = 1,
+             u64 max_image_bytes = 0);
 
 private:
     enum class DepthEncoding { None, Unorm16, Unorm24, Float32 };
@@ -225,6 +229,7 @@ private:
 
     FrameDumpSchedule schedule;
     bool truncated{};
+    size_t max_image_bytes{};
     std::filesystem::path directory;
     std::chrono::steady_clock::time_point start;
 
