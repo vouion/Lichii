@@ -11,10 +11,10 @@
 #include <condition_variable>
 #include <cstring>
 #include <cstdlib>
+#include <memory>
 #include <set>
 #include <span>
 #include <string>
-#include <cstdlib>
 #include <cstdio>
 #include <initializer_list>
 #include <limits>
@@ -1787,13 +1787,28 @@ private:
                 // this frame's draws, and recording copies the guest data they bind (the UI
                 // panel's storage buffer, vertex data). Let the GPU thread consume this frame's
                 // submissions first, or frame N+1's writes tear those copies and the dialogue
-                // panel and HUD blink (#286). Bisect switch for the A/B round.
+                // panel and HUD blink (#286). WaitForIdle is not a reliable consumption barrier:
+                // its queued sync callback can be satisfied at an earlier draw's drain point
+                // before later submissions are consumed, so wait on a queue-ordered marker
+                // instead (EDEN_NX2_RUNAHEAD_ORDERED=0 restores the old wait).
                 static const bool consume = [] {
                     const char* const value = std::getenv("EDEN_NX2_RUNAHEAD_CONSUME");
                     return value == nullptr || value[0] != '0';
                 }();
                 if (consume) {
-                    system.GPU().WaitForIdle();
+                    static const bool ordered = [] {
+                        const char* const value = std::getenv("EDEN_NX2_RUNAHEAD_ORDERED");
+                        return value == nullptr || value[0] != '0';
+                    }();
+                    if (ordered) {
+                        auto consumed = std::make_shared<Common::Event>();
+                        system.GPU().RunInOrder([consumed] { consumed->Set(); });
+                        while (system.IsPoweredOn() &&
+                               !consumed->WaitFor(std::chrono::milliseconds{50})) {
+                        }
+                    } else {
+                        system.GPU().WaitForIdle();
+                    }
                 }
             }
         } else if (frames_ahead == 0) {
