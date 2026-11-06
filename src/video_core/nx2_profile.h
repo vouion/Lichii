@@ -62,6 +62,9 @@ enum class Zone : u32 {
     WriterWait,
     ListSubmitWait,
     ListGpuWait,
+    HandleProgram, ///< Read handles: texture handles computed by a handle program
+    StorageBinds,  ///< Read handles: storage buffer bindings
+    SamplerLookup, ///< Read handles: sampler ids
     Count,
 };
 
@@ -74,6 +77,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait",
     "writer wait", "list submit wait", "list GPU wait",
+    "handle program", "storage binds", "sampler lookup",
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).

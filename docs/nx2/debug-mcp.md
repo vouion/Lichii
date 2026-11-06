@@ -224,6 +224,17 @@ The tool waits until the rasterizer applies the change and reports `applied`. A 
 loop: reject half of the candidates, screenshot, compare. Today each step is a rebuild of the
 environment plus a relaunch plus a replay.
 
+**`preflush_batching`** `{enabled, every?}`. This is `EDEN_NX2_PREFLUSH_EVERY` at runtime: it
+flips the buffer download cadence live between every fence (`enabled: false`) and one fence in N
+that has some (`enabled: true`; N is `every`, else the boot env's period when it batched, else
+64). The boot env value applies until flipped, and every flip logs one line
+(`preflush_batching: buffer downloads now commit at ...`). Batched downloads read-trap their
+pages, so a CPU read of a deferred page forces its download before the read completes: the
+auto-exposure readback stays correct while the per-fence downloads stay batched. Flipping back
+restores the per-fence path at the next fence. Made for unattended A/B sessions: flip, let the
+scene settle, compare exposure screenshots and the `EDEN_NX2_GPU_PROFILE=1` download counters,
+flip back — no relaunch.
+
 ### Guest and GPU memory (implemented)
 
 All three are read only. Reads return at most 64 KiB. Addresses are hex strings (`"0x8012345000"`)

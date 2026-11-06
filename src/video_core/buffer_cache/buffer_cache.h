@@ -275,8 +275,18 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     DAddr device_addr_end_aligned = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
     area->start_address = device_addr_start_aligned;
     area->end_address = device_addr_end_aligned;
-    if (memory_tracker.IsRegionPreflushable(device_addr, size)) {
+    const DAddr aligned_size = device_addr_end_aligned - device_addr_start_aligned;
+    // With batched or disabled fence downloads (DeferredDownloadTraps) a Preflushable mark no
+    // longer means guest memory holds the newest bytes: a still-dirty range forces its download
+    // below, and this read's consumed trap is forgotten either way so the next GPU write really
+    // re-arms the core instead of being skipped by the deduplication cache.
+    const bool deferred = DeferredDownloadTraps();
+    if (memory_tracker.IsRegionPreflushable(device_addr, size) &&
+        !(deferred && IsRegionGpuModified(device_addr_start_aligned, aligned_size))) {
         area->preemtive = true;
+        if (deferred) {
+            read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
+        }
         return area;
     };
     area->preemtive = !IsRegionGpuModified(device_addr_start_aligned,
@@ -292,6 +302,9 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         if (preflush) {
             memory_tracker.MarkRegionAsPreflushable(
                 device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
+            if (deferred) {
+                read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
+            }
         } else {
             if constexpr (USE_MEMORY_MAPS) {
                 cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
