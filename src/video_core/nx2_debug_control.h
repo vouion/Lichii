@@ -38,6 +38,14 @@ struct CaptureRequest {
     /// Also record the colour targets of this pass after every one of its draws (-1: off),
     /// tagged with the draw's shaders, to attribute pixels to draws.
     s32 draw_images_pass = -1;
+    /// Also select every pass whose first colour target starts at this GPU address (0: off), as
+    /// pass numbers move between frames.
+    u64 draw_images_addr = 0;
+    /// Within a selected pass, record after draws first, first + step, ... up to last (indices
+    /// counted from the pass's first draw).
+    u32 draw_images_first = 0;
+    u32 draw_images_last = 0xffffffff;
+    u32 draw_images_step = 1;
 };
 
 struct CaptureResult {

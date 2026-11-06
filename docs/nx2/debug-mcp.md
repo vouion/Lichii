@@ -168,7 +168,7 @@ default. The service turns it on at boot. A call without `after` returns the new
 it with `SetGlobalFilter` (`logging.cpp:449`), the call the Qt settings dialog makes. Lines
 already filtered out were never formatted, so the new filter applies only to later lines.
 
-**`capture_frame`** `{sampled?, buffers?, geometry?, frames?, max_image_mib?, max_total_mib?, max_buffer_kib?, draw_images_pass?, timeout_s?, manifest_lines?, index?}`. It reuses
+**`capture_frame`** `{sampled?, buffers?, geometry?, frames?, max_image_mib?, max_total_mib?, max_buffer_kib?, draw_images_pass?, draw_images_addr?, draw_images_first?, draw_images_last?, draw_images_step?, timeout_s?, manifest_lines?, index?}`. It reuses
 `FrameDump`. `FrameDump::Arm` (`vk_frame_dump.cpp:268`) points the next capture at a fresh directory and resets
 the per-capture counters, so `EDEN_NX2_FRAME_DUMP` is not needed. When to capture is decided by
 `FrameDumpSchedule`, which has no Vulkan state and is unit-tested. It handles both the env
@@ -203,7 +203,10 @@ lowers how much of each bound buffer is recorded (default 4096); the first entry
 cap adds a `kind: truncated` line with the pass and draw it stopped at. `draw_images_pass: N`
 also reads back pass N's colour targets after every one of its draws (`kind: draw_image`, with
 the draw's shaders and whether it was a task/mesh draw), which attributes each pixel to the draw
-that wrote it. The adapter-only
+that wrote it. `draw_images_addr` selects passes by their first colour target's GPU address
+instead, since pass numbers move between frames, and `draw_images_first`, `draw_images_last` and
+`draw_images_step` (draw indices counted from the pass's first draw) thin out the readbacks of a
+large pass so it can be bisected. The adapter-only
 `capture_image {directory, name}` returns one pass PNG as image content.
 
 **`sample`** `{threads?, seconds?, max_chars?}`. The in-process sampling profiler

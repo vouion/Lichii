@@ -262,6 +262,10 @@ private:
     size_t size_cap{};
     u32 buffer_cap{};
     s32 draw_images_pass{-1};
+    u64 draw_images_addr{};
+    u32 draw_images_first{};
+    u32 draw_images_last{0xffffffff};
+    u32 draw_images_step{1};
     std::vector<u64> last_draw_hashes;
     bool last_draw_mesh{};
     std::filesystem::path directory;

@@ -314,6 +314,12 @@ json CaptureFrame(ToolState& state, const json& params) {
     const u32 max_total_mib = Param<u32>(params, "max_total_mib", 2048, 64, 65536);
     const u32 max_buffer_kib = Param<u32>(params, "max_buffer_kib", 4096, 4, 65536);
     const s32 draw_images_pass = Param<s32>(params, "draw_images_pass", -1, -1, 1000000);
+    const u64 draw_images_addr =
+        params.contains("draw_images_addr") ? AddressParam(params, "draw_images_addr") : 0;
+    const u32 draw_images_first = Param<u32>(params, "draw_images_first", 0, 0, 0xffffffff);
+    const u32 draw_images_last =
+        Param<u32>(params, "draw_images_last", 0xffffffff, 0, 0xffffffff);
+    const u32 draw_images_step = Param<u32>(params, "draw_images_step", 1, 1, 1000000);
     VideoCore::Nx2Debug::RequestCapture({.id = id,
                                          .directory = directory,
                                          .sampled = sampled,
@@ -323,7 +329,11 @@ json CaptureFrame(ToolState& state, const json& params) {
                                          .max_image_bytes = u64{max_image_mib} << 20,
                                          .max_total_bytes = u64{max_total_mib} << 20,
                                          .max_buffer_bytes = max_buffer_kib << 10,
-                                         .draw_images_pass = draw_images_pass});
+                                         .draw_images_pass = draw_images_pass,
+                                         .draw_images_addr = draw_images_addr,
+                                         .draw_images_first = draw_images_first,
+                                         .draw_images_last = draw_images_last,
+                                         .draw_images_step = draw_images_step});
     const auto finished = VideoCore::Nx2Debug::WaitCapture(id, std::chrono::seconds{timeout});
     if (!finished) {
         VideoCore::Nx2Debug::CancelCapture(id);
@@ -369,6 +379,10 @@ json CaptureFrame(ToolState& state, const json& params) {
         {"max_total_mib", max_total_mib},
         {"max_buffer_kib", max_buffer_kib},
         {"draw_images_pass", draw_images_pass},
+        {"draw_images_addr", HexAddress(draw_images_addr)},
+        {"draw_images_first", draw_images_first},
+        {"draw_images_last", draw_images_last},
+        {"draw_images_step", draw_images_step},
         {"frame", std::move(frame)},
         {"summary", std::move(summary)},
         {"kinds", std::move(kinds)},

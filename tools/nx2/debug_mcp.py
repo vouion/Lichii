@@ -110,6 +110,15 @@ TOOLS = [
                 "draw_images_pass": {"type": "integer", "minimum": -1, "maximum": 1000000,
                                      "description": "Also record that pass's targets after "
                                                     "every draw (kind: draw_image)"},
+                "draw_images_addr": {"type": "string",
+                                     "description": "Also select every pass whose first colour "
+                                                    "target starts at this GPU address (hex)"},
+                "draw_images_first": {"type": "integer", "minimum": 0,
+                                      "description": "First draw (from the pass's first) to record"},
+                "draw_images_last": {"type": "integer", "minimum": 0,
+                                     "description": "Last draw (from the pass's first) to record"},
+                "draw_images_step": {"type": "integer", "minimum": 1, "maximum": 1000000,
+                                     "description": "Record every Nth draw from draw_images_first"},
             },
         },
     },

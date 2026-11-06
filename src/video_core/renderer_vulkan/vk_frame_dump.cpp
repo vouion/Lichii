@@ -279,6 +279,10 @@ void FrameDump::Arm(VideoCore::Nx2Debug::CaptureRequest request) {
                                             : SIZE_CAP;
     buffer_cap = request.max_buffer_bytes != 0 ? request.max_buffer_bytes : 4U << 20;
     draw_images_pass = request.draw_images_pass;
+    draw_images_addr = request.draw_images_addr;
+    draw_images_first = request.draw_images_first;
+    draw_images_last = request.draw_images_last;
+    draw_images_step = (std::max)(request.draw_images_step, 1U);
     last_draw_hashes.clear();
     last_draw_mesh = false;
     truncated = false;
@@ -527,8 +531,13 @@ void FrameDump::NoteLaunch(u64 shader_hash, const std::array<u32, 3>& grid,
 
 bool FrameDump::NoteDraw(std::span<const u64> shader_hashes, bool mesh) {
     bool recorded = false;
-    if (draw_images_pass >= 0 && static_cast<u32>(draw_images_pass) == pass_index &&
-        draws > pass_first_draw) {
+    const bool pass_selected =
+        (draw_images_pass >= 0 && static_cast<u32>(draw_images_pass) == pass_index) ||
+        (draw_images_addr != 0 && !pass_targets.empty() &&
+         pass_targets.front().gpu_addr == draw_images_addr);
+    const u32 in_pass = draws > pass_first_draw ? draws - 1 - pass_first_draw : 0;
+    if (pass_selected && draws > pass_first_draw && in_pass >= draw_images_first &&
+        in_pass <= draw_images_last && (in_pass - draw_images_first) % draw_images_step == 0) {
         // The targets as the previous draw of this pass left them.
         std::string shaders;
         for (const u64 hash : last_draw_hashes) {
