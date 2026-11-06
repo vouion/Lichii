@@ -311,13 +311,19 @@ json CaptureFrame(ToolState& state, const json& params) {
     const int timeout = Param<int>(params, "timeout_s", 120, 1, 600);
     const u32 frames = Param<u32>(params, "frames", 1, 1, 16);
     const u32 max_image_mib = Param<u32>(params, "max_image_mib", 0, 0, 4096);
+    const u32 max_total_mib = Param<u32>(params, "max_total_mib", 2048, 64, 65536);
+    const u32 max_buffer_kib = Param<u32>(params, "max_buffer_kib", 4096, 4, 65536);
+    const s32 draw_images_pass = Param<s32>(params, "draw_images_pass", -1, -1, 1000000);
     VideoCore::Nx2Debug::RequestCapture({.id = id,
                                          .directory = directory,
                                          .sampled = sampled,
                                          .buffers = buffers,
                                          .geometry = geometry,
                                          .frames = frames,
-                                         .max_image_bytes = u64{max_image_mib} << 20});
+                                         .max_image_bytes = u64{max_image_mib} << 20,
+                                         .max_total_bytes = u64{max_total_mib} << 20,
+                                         .max_buffer_bytes = max_buffer_kib << 10,
+                                         .draw_images_pass = draw_images_pass});
     const auto finished = VideoCore::Nx2Debug::WaitCapture(id, std::chrono::seconds{timeout});
     if (!finished) {
         VideoCore::Nx2Debug::CancelCapture(id);
@@ -360,6 +366,9 @@ json CaptureFrame(ToolState& state, const json& params) {
         {"geometry", geometry},
         {"frames", frames},
         {"max_image_mib", max_image_mib},
+        {"max_total_mib", max_total_mib},
+        {"max_buffer_kib", max_buffer_kib},
+        {"draw_images_pass", draw_images_pass},
         {"frame", std::move(frame)},
         {"summary", std::move(summary)},
         {"kinds", std::move(kinds)},

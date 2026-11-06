@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -167,7 +168,10 @@ public:
     /// Starts a pass when the framebuffer changes and captures the previous one.
     /// Returns true when copies were recorded, which ends the current render pass.
     bool BeginPass(const void* framebuffer, std::span<ImageView* const> colors);
-    void NoteDraw(std::span<const u64> shader_hashes);
+    /// Counts a draw; with `draw_images_pass` set to this pass, also reads back the pass
+    /// targets as left by the previous draw. Returns true when copies were recorded, which
+    /// ends the current render pass.
+    bool NoteDraw(std::span<const u64> shader_hashes, bool mesh);
     /// Captures the current pass; returns true when copies were recorded.
     bool EndPass();
     void CaptureDispatch(u64 shader_hash, std::span<ImageView* const> written);
@@ -175,11 +179,16 @@ public:
     /// Waits for pending readbacks and writes them once they pass the staging budget.
     void DrainIfFull();
     void TickFrame();
-    /// Captures the next `frames` frames into `directory` for the debug server, which is told
-    /// `id` once the manifest is complete. Works without EDEN_NX2_FRAME_DUMP. Images larger than
-    /// `max_image_bytes` (0: no limit) are skipped with a `skipped: size` manifest line.
-    void Arm(std::filesystem::path directory, bool sampled, bool buffers, u64 id, u32 frames = 1,
-             u64 max_image_bytes = 0, bool geometry = false);
+    /// Captures the next `request.frames` frames into `request.directory` for the debug
+    /// server, which is told `request.id` once the manifest is complete. Works without
+    /// EDEN_NX2_FRAME_DUMP. Images larger than `max_image_bytes` (0: no limit) are skipped with
+    /// a `skipped: size` manifest line.
+    void Arm(VideoCore::Nx2Debug::CaptureRequest request);
+
+    /// Bytes of each bound buffer the capture records at most.
+    [[nodiscard]] u32 BufferCap() const noexcept {
+        return buffer_cap;
+    }
 
 private:
     enum class DepthEncoding { None, Unorm16, Unorm24, Float32 };
@@ -228,6 +237,10 @@ private:
     static u32 TexelBytes(const Target& target);
     static int Decode(const Target& target, const u8* pixel, std::array<float, 4>& out);
     bool Record(const Target& target, std::string name, std::string tags);
+    /// Reads back every target of the current pass, named `what`.
+    bool RecordPassTargets(const std::string& what, const std::string& tags);
+    /// Whether `size` more bytes fit under the size cap; notes the first refusal in the manifest.
+    bool FitsCap(size_t size);
     bool RecordSampled(const Sampled& texture, u32 index, std::string name, std::string tags);
     bool RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string tags,
                       std::vector<u8> guest = {});
@@ -246,6 +259,11 @@ private:
     FrameDumpSchedule schedule;
     bool truncated{};
     size_t max_image_bytes{};
+    size_t size_cap{};
+    u32 buffer_cap{};
+    s32 draw_images_pass{-1};
+    std::vector<u64> last_draw_hashes;
+    bool last_draw_mesh{};
     std::filesystem::path directory;
     std::chrono::steady_clock::time_point start;
 

@@ -31,6 +31,13 @@ struct CaptureRequest {
     /// Skip images larger than this many bytes, 0 for no limit, so a capture at a high
     /// resolution scale reaches its late passes within the size cap.
     u64 max_image_bytes = 0;
+    /// Stop recording once this many raw bytes were read back (0: the 2 GiB default).
+    u64 max_total_bytes = 0;
+    /// Record at most this many bytes of each bound buffer (0: the 4 MiB default).
+    u32 max_buffer_bytes = 0;
+    /// Also record the colour targets of this pass after every one of its draws (-1: off),
+    /// tagged with the draw's shaders, to attribute pixels to draws.
+    s32 draw_images_pass = -1;
 };
 
 struct CaptureResult {

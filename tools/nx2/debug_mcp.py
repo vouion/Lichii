@@ -102,7 +102,14 @@ TOOLS = [
                                           "kind: frame lines"},
                 "max_image_mib": {"type": "integer", "minimum": 0, "maximum": 4096,
                                   "description": "Skip images above this size so late passes "
-                                                 "fit under the 2 GiB cap"},
+                                                 "fit under the size cap"},
+                "max_total_mib": {"type": "integer", "minimum": 64, "maximum": 65536,
+                                  "description": "Raw readback cap, default 2048"},
+                "max_buffer_kib": {"type": "integer", "minimum": 4, "maximum": 65536,
+                                   "description": "Bytes recorded per bound buffer, default 4096"},
+                "draw_images_pass": {"type": "integer", "minimum": -1, "maximum": 1000000,
+                                     "description": "Also record that pass's targets after "
+                                                    "every draw (kind: draw_image)"},
             },
         },
     },

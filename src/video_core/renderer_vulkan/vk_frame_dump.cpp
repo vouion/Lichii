@@ -265,15 +265,22 @@ void FrameDump::StopWriter() {
     stop_writer = false;
 }
 
-void FrameDump::Arm(std::filesystem::path directory_, bool sampled, bool buffers, u64 id,
-                    u32 frames, u64 max_image_bytes_, bool geometry) {
-    if (!schedule.Arm(sampled, buffers, geometry, id, frames)) {
-        VideoCore::Nx2Debug::FinishCapture(id, {.error = "another capture is in progress"});
+void FrameDump::Arm(VideoCore::Nx2Debug::CaptureRequest request) {
+    if (!schedule.Arm(request.sampled, request.buffers, request.geometry, request.id,
+                      request.frames)) {
+        VideoCore::Nx2Debug::FinishCapture(request.id,
+                                           {.error = "another capture is in progress"});
         return;
     }
     StopWriter();
-    directory = std::move(directory_);
-    max_image_bytes = static_cast<size_t>(max_image_bytes_);
+    directory = std::move(request.directory);
+    max_image_bytes = static_cast<size_t>(request.max_image_bytes);
+    size_cap = request.max_total_bytes != 0 ? static_cast<size_t>(request.max_total_bytes)
+                                            : SIZE_CAP;
+    buffer_cap = request.max_buffer_bytes != 0 ? request.max_buffer_bytes : 4U << 20;
+    draw_images_pass = request.draw_images_pass;
+    last_draw_hashes.clear();
+    last_draw_mesh = false;
     truncated = false;
     recorded_bytes = 0;
     written_bytes = 0;
@@ -518,7 +525,22 @@ void FrameDump::NoteLaunch(u64 shader_hash, const std::array<u32, 3>& grid,
     Enqueue({.tags = tags + "}"});
 }
 
-void FrameDump::NoteDraw(std::span<const u64> shader_hashes) {
+bool FrameDump::NoteDraw(std::span<const u64> shader_hashes, bool mesh) {
+    bool recorded = false;
+    if (draw_images_pass >= 0 && static_cast<u32>(draw_images_pass) == pass_index &&
+        draws > pass_first_draw) {
+        // The targets as the previous draw of this pass left them.
+        std::string shaders;
+        for (const u64 hash : last_draw_hashes) {
+            shaders += fmt::format("{}\"{:016x}\"", shaders.empty() ? "" : ",", hash);
+        }
+        recorded = RecordPassTargets(
+            fmt::format("after_d{}", draws - 1),
+            fmt::format(R"("kind":"draw_image","pass":{},"after_draw":{},"mesh":{},"shaders":[{}])",
+                        pass_index, draws - 1, last_draw_mesh, shaders));
+    }
+    last_draw_hashes.assign(shader_hashes.begin(), shader_hashes.end());
+    last_draw_mesh = mesh;
     ++draws;
     for (const u64 hash : shader_hashes) {
         if (hash != 0 && pass_hashes.size() < 32 &&
@@ -526,6 +548,7 @@ void FrameDump::NoteDraw(std::span<const u64> shader_hashes) {
             pass_hashes.push_back(hash);
         }
     }
+    return recorded;
 }
 
 bool FrameDump::EndPass() {
@@ -588,8 +611,7 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
                                      tags, size)});
         return false;
     }
-    if (recorded_bytes + size > SIZE_CAP) {
-        truncated = true;
+    if (!FitsCap(size)) {
         return false;
     }
     recorded_bytes += size;
@@ -641,10 +663,33 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
     return true;
 }
 
+bool FrameDump::FitsCap(size_t size) {
+    if (recorded_bytes + size <= size_cap) {
+        return true;
+    }
+    if (!truncated) {
+        Enqueue({.tags = fmt::format(
+                     R"({{"kind":"truncated","pass":{},"draw":{},"dispatch":{},"recorded_bytes":{},"cap":{}}})",
+                     pass_index, draws, dispatches, recorded_bytes, size_cap)});
+    }
+    truncated = true;
+    return false;
+}
+
+bool FrameDump::RecordPassTargets(const std::string& what, const std::string& tags) {
+    bool recorded = false;
+    for (const Target& target : pass_targets) {
+        recorded |= Record(target,
+                           fmt::format("{:04}_pass{:03}_{}_rt{}", sequence++, pass_index, what,
+                                       target.slot),
+                           fmt::format(R"({},"slot":{})", tags, target.slot));
+    }
+    return recorded;
+}
+
 bool FrameDump::RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string tags,
                              std::vector<u8> guest) {
-    if (recorded_bytes + size > SIZE_CAP) {
-        truncated = true;
+    if (!FitsCap(size)) {
         return false;
     }
     recorded_bytes += size;
@@ -744,7 +789,7 @@ void FrameDump::WriterLoop() {
             manifest.close();
             LOG_INFO(Render_Vulkan, "Frame dump done: {} images, {}, {} MiB in {}{}", images,
                      job.tags, written_bytes >> 20, directory.string(),
-                     job.truncated ? fmt::format(" (stopped at the {} GiB cap)", SIZE_CAP >> 30)
+                     job.truncated ? fmt::format(" (stopped at the {} MiB cap)", size_cap >> 20)
                                    : "");
             if (const u64 id = schedule.CaptureId(); id != 0) {
                 VideoCore::Nx2Debug::FinishCapture(id, {});

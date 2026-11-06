@@ -475,8 +475,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     TraceRenderState(is_indexed, "configured", texture_cache.GetFramebuffer());
     if (frame_dump.Capturing()) {
         FrameDumpPass(texture_cache.GetFramebuffer());
-        frame_dump.NoteDraw(pipeline->ShaderHashes());
-        bool recorded = false;
+        bool recorded = frame_dump.NoteDraw(pipeline->ShaderHashes(), pipeline->IsMeshPipeline());
         if (frame_dump.CapturingSampled()) {
             boost::container::small_vector<FrameDump::Sampled, 16> sampled;
             for (const auto& image : pipeline->SampledImages()) {
@@ -1934,11 +1933,11 @@ void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> 
 
 bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes,
                                         bool geometry) {
-    static constexpr u32 BUFFER_CAP = 4U << 20;
+    const u32 buffer_cap = frame_dump.BufferCap();
     std::vector<FrameDump::BoundBuffer> buffers;
     const auto visit = [&](u32 stage, bool storage, u32 index, bool written, const auto& binding,
                            u32 bound_size, const auto* host, u32 host_offset) {
-        const u32 size = std::min(bound_size, BUFFER_CAP);
+        const u32 size = std::min(bound_size, buffer_cap);
         const bool gpu_modified = buffer_cache.IsRegionGpuModified(binding.device_addr, size);
         FrameDump::BoundBuffer& buffer = buffers.emplace_back(FrameDump::BoundBuffer{
             .stage = stage,
@@ -1980,9 +1979,7 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 void RasterizerVulkan::TickFrame() {
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
-            frame_dump.Arm(std::move(capture->directory), capture->sampled, capture->buffers,
-                           capture->id, capture->frames, capture->max_image_bytes,
-                           capture->geometry);
+            frame_dump.Arm(std::move(*capture));
         }
         if (const auto change = VideoCore::Nx2Debug::TakeRejectChange()) {
             pipeline_cache.RefreshDebugRejections(change->unrejected);
