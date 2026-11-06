@@ -383,7 +383,8 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
                 Common::g_wall_clock.cntpct_rdtsc_factor.load(std::memory_order_relaxed);
             if (ShouldPauseCntpctSpins()) {
                 config.inline_cntpct_last_ptr = &m_cb->m_last_cntpct;
-                config.inline_cntpct_spin_ticks = m_cb->m_spin_ticks;
+                // cntfrq_el0 / 600'000 (~32 at the Switch clock); dynarmic's field is 32-bit.
+                config.inline_cntpct_spin_ticks = static_cast<u32>(m_cb->m_spin_ticks);
             }
         }
     }
