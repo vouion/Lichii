@@ -23,7 +23,7 @@ TEST_CASE("Frame dump schedule is idle until configured or armed", "[frame_dump_
 TEST_CASE("Frame dump schedule records sampled textures for an armed sampled capture",
           "[frame_dump_schedule]") {
     FrameDumpSchedule schedule;
-    REQUIRE(schedule.Arm(true, false, 7));
+    REQUIRE(schedule.Arm(true, false, false, 7, 1));
     REQUIRE_FALSE(Vulkan::RecordingSampledTextures());
     // The pipelines read the flag while the captured frame is drawn, between Start and Finish.
     REQUIRE(schedule.Tick(0.0) == Step::Start);
@@ -32,20 +32,20 @@ TEST_CASE("Frame dump schedule records sampled textures for an armed sampled cap
     REQUIRE_FALSE(schedule.Buffers());
     REQUIRE(schedule.CaptureId() == 7);
     REQUIRE(Vulkan::RecordingSampledTextures());
-    REQUIRE_FALSE(schedule.Arm(false, false, 8));
+    REQUIRE_FALSE(schedule.Arm(false, false, false, 8, 1));
     REQUIRE(schedule.Tick(0.0) == Step::Finish);
     REQUIRE_FALSE(schedule.Capturing());
     REQUIRE_FALSE(Vulkan::RecordingSampledTextures());
     REQUIRE(schedule.Tick(0.0) == Step::None);
 
     // The next request decides again: this one does not read sampled textures back.
-    REQUIRE(schedule.Arm(false, false, 8));
+    REQUIRE(schedule.Arm(false, false, false, 8, 1));
     REQUIRE(schedule.Tick(0.0) == Step::Start);
     REQUIRE(schedule.CaptureId() == 8);
     REQUIRE_FALSE(Vulkan::RecordingSampledTextures());
     REQUIRE(schedule.Tick(0.0) == Step::Finish);
 
-    REQUIRE(schedule.Arm(true, false, 9));
+    REQUIRE(schedule.Arm(true, false, false, 9, 1));
     REQUIRE(schedule.Tick(0.0) == Step::Start);
     REQUIRE(Vulkan::RecordingSampledTextures());
     schedule.Abort();
@@ -57,14 +57,14 @@ TEST_CASE("Frame dump schedule records sampled textures for an armed sampled cap
 TEST_CASE("Frame dump schedule records buffers independently of sampled textures",
           "[frame_dump_schedule]") {
     FrameDumpSchedule schedule;
-    REQUIRE(schedule.Arm(false, true, 3));
+    REQUIRE(schedule.Arm(false, true, false, 3, 1));
     REQUIRE(schedule.Tick(0.0) == Step::Start);
     REQUIRE(schedule.Buffers());
     REQUIRE_FALSE(schedule.Sampled());
     // Buffers come from the buffer cache's bindings, not from the pipelines' sampled list.
     REQUIRE_FALSE(Vulkan::RecordingSampledTextures());
     REQUIRE(schedule.Tick(0.0) == Step::Finish);
-    REQUIRE(schedule.Arm(true, true, 4));
+    REQUIRE(schedule.Arm(true, true, false, 4, 1));
     REQUIRE(schedule.Tick(0.0) == Step::Start);
     REQUIRE(schedule.Buffers());
     REQUIRE(Vulkan::RecordingSampledTextures());
@@ -107,4 +107,25 @@ TEST_CASE("Frame dump schedule follows EDEN_NX2_FRAME_DUMP_AT", "[frame_dump_sch
     REQUIRE(by_file.Tick(1000.0) == Step::Start);
     REQUIRE(by_file.Frame() == 90);
     std::filesystem::remove_all(directory);
+}
+
+TEST_CASE("Frame dump schedule keeps capturing for the requested frames", "[frame_dump_schedule]") {
+    FrameDumpSchedule schedule;
+    REQUIRE(schedule.Arm(false, true, true, 5, 3));
+    REQUIRE(schedule.Tick(0.0) == Step::Start);
+    REQUIRE(schedule.Geometry());
+    // Each later present continues into the same manifest until the last frame ends.
+    REQUIRE(schedule.Tick(0.0) == Step::Next);
+    REQUIRE(schedule.Capturing());
+    REQUIRE(schedule.Tick(0.0) == Step::Next);
+    REQUIRE(schedule.Capturing());
+    REQUIRE(schedule.Tick(0.0) == Step::Finish);
+    REQUIRE_FALSE(schedule.Capturing());
+    REQUIRE(schedule.Tick(0.0) == Step::None);
+
+    // A zero or one frame request behaves as before, and geometry is off unless asked.
+    REQUIRE(schedule.Arm(false, true, false, 6, 0));
+    REQUIRE(schedule.Tick(0.0) == Step::Start);
+    REQUIRE_FALSE(schedule.Geometry());
+    REQUIRE(schedule.Tick(0.0) == Step::Finish);
 }
