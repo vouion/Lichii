@@ -1781,6 +1781,13 @@ private:
             WaitForFrame(m_previous_fence_id, m_previous_fence_value);
             if (gpu_behind) {
                 WaitForFrame(~w[22], w[24]);
+            } else {
+                // The game may now prepare frame N+1 while the GPU thread still has to record
+                // this frame's draws, and recording copies the guest data they bind (the UI
+                // panel's storage buffer, vertex data). Let the GPU thread consume this frame's
+                // submissions first, or frame N+1's writes tear those copies and the dialogue
+                // panel and HUD blink (#286).
+                system.GPU().WaitForIdle();
             }
         } else if (frames_ahead == 0) {
             WaitForFrame(~w[22], w[24]);
