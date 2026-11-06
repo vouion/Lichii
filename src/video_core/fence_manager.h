@@ -23,6 +23,7 @@
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_wait_site.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
@@ -152,10 +153,15 @@ public:
                 wait_cv.notify_all();
             });
             SignalFence(std::move(func));
+            if (wait_finished.load(std::memory_order_relaxed)) {
+                return; // The callback ran at once (undelayed fences)
+            }
             // The fence's commands can be held back by a deferred flush that only this thread
-            // submits. The fencing thread waits for that submission before releasing the fence,
-            // so waiting here without submitting deadlocks (Ocarina of Time entering gameplay).
+            // submits (Scheduler::DeferFlush): the fencing thread runs the callback once the
+            // fence's work is submitted, so waiting here without submitting deadlocks
+            // (Ocarina of Time entering gameplay).
             SubmitDeferredWork();
+            BackWaitScope wait_scope{"FenceManager::WaitPendingFences (fencing thread callback)"};
             std::unique_lock lk(wait_mutex);
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
@@ -191,7 +197,8 @@ protected:
     virtual bool IsFenceSignaled(TFence& fence) const = 0;
     /// Waits until a fence has been signalled by the host GPU.
     virtual void WaitFence(TFence& fence) = 0;
-    /// Submits work whose submission the backend deferred (called before blocking on a fence).
+    /// Submits work the calling thread deferred (called before blocking on a fence; Vulkan:
+    /// the split's back, Scheduler::DeferFlush).
     virtual void SubmitDeferredWork() {}
 
     VideoCore::RasterizerInterface& rasterizer;
