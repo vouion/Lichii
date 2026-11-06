@@ -39,6 +39,14 @@ inline std::atomic<int> g_list_fast{EnvSwitch("EDEN_NX2_LIST_FAST")};
 /// loop writes the back would ignore (draw.end in an instance loop, unchanged vertex and index
 /// buffer firsts and counts) (maxwell_3d.cpp).
 inline std::atomic<int> g_loop_skip{EnvSwitch("EDEN_NX2_LOOP_SKIP")};
+/// EDEN_NX2_PREFLUSH_NATIVE=0 keeps trap-and-flush for native titles, 1 (default) marks the pages
+/// the guest reads Preflushable and keeps them read-trapped (the download lands at the fence; the
+/// trap's GetFlushArea dirty check forces it early when a read beats the fence), 2 marks without
+/// the trap (unsafe with the split thread; A/B only) (buffer_cache).
+inline std::atomic<int> g_preflush_native{[] {
+    const char* const value = std::getenv("EDEN_NX2_PREFLUSH_NATIVE");
+    return value == nullptr ? 1 : (value[0] == '0' ? 0 : (value[0] == '2' ? 2 : 1));
+}()};
 
 /// The live switch called `name`, or null.
 [[nodiscard]] inline std::atomic<int>* FindSwitch(std::string_view name) {
@@ -53,6 +61,9 @@ inline std::atomic<int> g_loop_skip{EnvSwitch("EDEN_NX2_LOOP_SKIP")};
     }
     if (name == "EDEN_NX2_LOOP_SKIP") {
         return &g_loop_skip;
+    }
+    if (name == "EDEN_NX2_PREFLUSH_NATIVE") {
+        return &g_preflush_native;
     }
     return nullptr;
 }
