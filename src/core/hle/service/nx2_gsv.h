@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <cstdlib>
 #include <set>
 #include <span>
 #include <string>
@@ -1786,8 +1787,14 @@ private:
                 // this frame's draws, and recording copies the guest data they bind (the UI
                 // panel's storage buffer, vertex data). Let the GPU thread consume this frame's
                 // submissions first, or frame N+1's writes tear those copies and the dialogue
-                // panel and HUD blink (#286).
-                system.GPU().WaitForIdle();
+                // panel and HUD blink (#286). Bisect switch for the A/B round.
+                static const bool consume = [] {
+                    const char* const value = std::getenv("EDEN_NX2_RUNAHEAD_CONSUME");
+                    return value == nullptr || value[0] != '0';
+                }();
+                if (consume) {
+                    system.GPU().WaitForIdle();
+                }
             }
         } else if (frames_ahead == 0) {
             WaitForFrame(~w[22], w[24]);

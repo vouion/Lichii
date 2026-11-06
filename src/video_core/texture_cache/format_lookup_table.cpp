@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <cstdlib>
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "video_core/texture_cache/format_lookup_table.h"
@@ -61,7 +62,15 @@ PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, 
     // with an unused alpha. Left unmapped, both fell through to the unimplemented fallback and
     // decoded as A8B8G8R8_UNORM - wrong channels and bytes per block for the fog LUTs, water
     // ripples and canopy lightmaps that use them (green wash, sparkle flecks).
+    // Bisect switch for the A/B round; unconditional once validated.
+    static const bool normalize = [] {
+        const char* const value = std::getenv("EDEN_NX2_FMT_NORMALIZE");
+        return value == nullptr || value[0] != '0';
+    }();
     const auto base_component = [](ComponentType component) {
+        if (!normalize) {
+            return component;
+        }
         switch (component) {
         case ComponentType::SNORM_FORCE_FP16:
             return ComponentType::SNORM;
@@ -72,7 +81,7 @@ PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, 
         }
     };
     const TextureFormat base_format =
-        format == TextureFormat::X8B8G8R8 ? TextureFormat::A8B8G8R8 : format;
+        normalize && format == TextureFormat::X8B8G8R8 ? TextureFormat::A8B8G8R8 : format;
     switch (Hash(base_format, base_component(red), base_component(green), base_component(blue),
                  base_component(alpha), is_srgb)) {
     case Hash(TextureFormat::A8B8G8R8, UNORM):
