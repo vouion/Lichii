@@ -52,14 +52,18 @@ public:
         }
         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
         std::pair<T, bool> result;
-        // This runs for every texture and sampler of every draw. An entry within one page is
-        // contiguous in host memory, so a single page lookup replaces the generic block read.
-        const bool one_page =
-            (gpu_addr & Core::Memory::YUZU_PAGEMASK) + sizeof(T) <= Core::Memory::YUZU_PAGESIZE;
-        if (const u8* const host = one_page ? gpu_memory.GetPointer(gpu_addr) : nullptr) {
-            std::memcpy(std::addressof(result.first), host, sizeof(T));
-        } else {
-            gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+        ReadFast(gpu_memory, gpu_addr, &result.first);
+        // The guest rewrites descriptor entries while this runs (scene loads stream new
+        // textures into recycled slots, and fences release before GPU work commits). A read
+        // that lands in the middle of a rewrite tears the entry, and a page with pending
+        // GPU-written data reads stale; both surface as wrong-format, wrong-swizzle views
+        // (the format=0 asserts, green channel loss, blinking UI and stretched textures).
+        // Read twice and fall back to the flushing read when they disagree, so a torn or
+        // stale entry resolves to the guest's real bytes instead of being bound.
+        T again;
+        ReadFast(gpu_memory, gpu_addr, &again);
+        if (std::memcmp(&result.first, &again, sizeof(T)) != 0) {
+            gpu_memory.ReadBlock(gpu_addr, std::addressof(result.first), sizeof(T));
         }
         if ((read_descriptors[index / 64] & (1ULL << (index % 64))) != 0) {
             result.second = result.first != descriptors[index];
@@ -95,6 +99,19 @@ public:
     bool invalidated{}; ///< read_descriptors is to be cleared before the next read
 
 private:
+    // This runs for every texture and sampler of every draw. An entry within one page is
+    // contiguous in host memory, so a single page lookup replaces the generic block read.
+    template <class MemoryManager>
+    static void ReadFast(const MemoryManager& gpu_memory, GPUVAddr gpu_addr, T* out) noexcept {
+        const bool one_page =
+            (gpu_addr & Core::Memory::YUZU_PAGEMASK) + sizeof(T) <= Core::Memory::YUZU_PAGESIZE;
+        if (const u8* const host = one_page ? gpu_memory.GetPointer(gpu_addr) : nullptr) {
+            std::memcpy(out, host, sizeof(T));
+        } else {
+            gpu_memory.ReadBlockUnsafe(gpu_addr, out, sizeof(T));
+        }
+    }
+
     void ClearReadDescriptors() noexcept {
         // Reserved capacity is not addressable. A later limit increase clears its new range.
         const size_t words = (std::min)(read_descriptors.size(), size_t{current_limit} / 64 + 1);

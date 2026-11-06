@@ -27,6 +27,10 @@ struct DescriptorMemory {
         const auto offset = (address - 0x1000) % 0x1000;
         std::memcpy(output, reinterpret_cast<const u8*>(banks[bank].data()) + offset, size);
     }
+
+    void ReadBlock(GPUVAddr address, void* output, size_t size) const {
+        ReadBlockUnsafe(address, output, size);
+    }
 };
 } // namespace
 
@@ -115,6 +119,10 @@ TEST_CASE("Descriptor limits clear exposed slots after shrink and growth", "[des
 
         void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
             std::memcpy(output, &address, size);
+        }
+
+        void ReadBlock(GPUVAddr address, void* output, size_t size) const {
+            ReadBlockUnsafe(address, output, size);
         }
     } memory;
     constexpr std::array<u32, 9> limits{0, 63, 64, 127, 128, 0x7ffff, 0x80000, 0x80001, 0x100000};
@@ -286,6 +294,10 @@ TEST_CASE("Bound descriptor IDs refresh after descriptor capacity changes", "[de
         void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
             std::memcpy(output, &address, size);
         }
+
+        void ReadBlock(GPUVAddr address, void* output, size_t size) const {
+            ReadBlockUnsafe(address, output, size);
+        }
     } memory;
     VideoCommon::DescriptorTable<u64, Common::SlotId> table;
     for (const u32 limit : {0U, 63U, 64U, 127U, 0x7ffffU, 0x80000U, 0x80001U}) {
@@ -374,6 +386,10 @@ TEST_CASE("Descriptor ID lookup CPU benchmark", "[.][descriptor_lookup_bench]") 
 
         void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
             std::memcpy(output, GetPointer(address), size);
+        }
+
+        void ReadBlock(GPUVAddr address, void* output, size_t size) const {
+            ReadBlockUnsafe(address, output, size);
         }
     };
     struct Result {

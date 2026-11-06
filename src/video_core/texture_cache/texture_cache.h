@@ -894,6 +894,14 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
             return pair->second;
         }
         table.bound_ids[index] = NULL_IMAGE_VIEW_ID;
+        static std::atomic<u32> invalid_reports{};
+        if (invalid_reports.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_ERROR(HW_GPU,
+                      "Invalid image descriptor: index={:#x} pool={:#x} raw={:016x}/{:016x}/"
+                      "{:016x}/{:016x}",
+                      index, table.current_gpu_addr, descriptor.raw[0], descriptor.raw[1],
+                      descriptor.raw[2], descriptor.raw[3]);
+        }
         return NULL_IMAGE_VIEW_ID;
     }
     const auto id = table.bound_ids[index];
