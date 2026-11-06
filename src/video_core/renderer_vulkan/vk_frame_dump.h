@@ -43,7 +43,7 @@ public:
     void Configure(std::string_view at, std::filesystem::path trigger_file, bool sampled);
     /// Captures the next `frames` frames for the debug server, which is told `id`. False while a
     /// capture runs.
-    bool Arm(bool sampled, bool buffers, u64 id, u32 frames);
+    bool Arm(bool sampled, bool buffers, bool geometry, u64 id, u32 frames);
     /// Once per presented frame: whether a capture starts with the next frame or has ended.
     Step Tick(double elapsed_seconds);
     /// The capture Tick started could not begin.
@@ -59,6 +59,10 @@ public:
     [[nodiscard]] bool Buffers() const noexcept {
         return buffers;
     }
+    /// Whether the vertex and index buffers of every draw are recorded too.
+    [[nodiscard]] bool Geometry() const noexcept {
+        return geometry;
+    }
     [[nodiscard]] u64 Frame() const noexcept {
         return frame;
     }
@@ -73,6 +77,7 @@ private:
     bool enabled{};
     bool sampled{};
     bool buffers{};
+    bool geometry{};
     bool capturing{};
     bool done{};
     u32 frames_left{1};
@@ -108,10 +113,13 @@ public:
     /// A uniform or storage buffer binding. Its bytes come from guest memory, or from the host
     /// buffer when the GPU wrote the range and guest memory may be stale.
     struct BoundBuffer {
+        /// 0-4 graphics, 5 compute, 6 vertex buffer, 7 index buffer.
         u32 stage;
         bool storage;
         u32 index;
         bool written;
+        /// Guest CPU writes to the range are collected but not yet applied to the host buffer.
+        bool pending_cpu_write;
         GPUVAddr gpu_addr;
         u64 device_addr;
         u32 bound_size;
@@ -136,6 +144,10 @@ public:
 
     [[nodiscard]] bool CapturingBuffers() const noexcept {
         return schedule.Capturing() && schedule.Buffers();
+    }
+
+    [[nodiscard]] bool CapturingGeometry() const noexcept {
+        return CapturingBuffers() && schedule.Geometry();
     }
 
     /// Reads back the textures of the current draw not yet seen in this pass. Returns true when
@@ -167,7 +179,7 @@ public:
     /// `id` once the manifest is complete. Works without EDEN_NX2_FRAME_DUMP. Images larger than
     /// `max_image_bytes` (0: no limit) are skipped with a `skipped: size` manifest line.
     void Arm(std::filesystem::path directory, bool sampled, bool buffers, u64 id, u32 frames = 1,
-             u64 max_image_bytes = 0);
+             u64 max_image_bytes = 0, bool geometry = false);
 
 private:
     enum class DepthEncoding { None, Unorm16, Unorm24, Float32 };
@@ -195,6 +207,8 @@ private:
         std::string tags;
         bool raw{};
         size_t bytes{};
+        /// The guest bytes of a buffer readback, compared with the host bytes when written.
+        std::vector<u8> guest;
     };
 
     /// Work for the writer thread: an image readback (`name` set), buffer bytes (`raw`), a
@@ -204,6 +218,7 @@ private:
         std::string name;
         std::string tags;
         std::vector<u8> data;
+        std::vector<u8> guest;
         bool raw{};
         bool summary{};
         bool truncated{};
@@ -214,7 +229,8 @@ private:
     static int Decode(const Target& target, const u8* pixel, std::array<float, 4>& out);
     bool Record(const Target& target, std::string name, std::string tags);
     bool RecordSampled(const Sampled& texture, u32 index, std::string name, std::string tags);
-    bool RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string tags);
+    bool RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string tags,
+                      std::vector<u8> guest = {});
     void Drain();
     void Enqueue(Job job);
     void WriterLoop();

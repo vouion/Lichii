@@ -266,8 +266,8 @@ void FrameDump::StopWriter() {
 }
 
 void FrameDump::Arm(std::filesystem::path directory_, bool sampled, bool buffers, u64 id,
-                    u32 frames, u64 max_image_bytes_) {
-    if (!schedule.Arm(sampled, buffers, id, frames)) {
+                    u32 frames, u64 max_image_bytes_, bool geometry) {
+    if (!schedule.Arm(sampled, buffers, geometry, id, frames)) {
         VideoCore::Nx2Debug::FinishCapture(id, {.error = "another capture is in progress"});
         return;
     }
@@ -480,17 +480,24 @@ bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
         const std::string owner =
             compute ? fmt::format(R"("dispatch":{},"after_draws":{})", dispatches, draws)
                     : fmt::format(R"("pass":{},"draw":{})", pass_index, draws - 1);
-        const bool from_host = buffer.guest.empty();
+        // The host bytes are what the draw read; the guest bytes ride along to be compared with
+        // them, unless the GPU wrote the range and they are stale by design.
+        const bool has_host = buffer.host != VK_NULL_HANDLE;
+        const char* const type = buffer.stage == 6   ? "vertex"
+                                 : buffer.stage == 7 ? "index"
+                                 : buffer.storage    ? "storage"
+                                                     : "uniform";
         std::string tags = fmt::format(
-            R"("kind":"buffer",{},"stage":{},"shader":"{:016x}","type":"{}","index":{},"written":{},"gpu_addr":"{:#x}","device_addr":"{:#x}","bound_size":{},"size":{},"gpu_modified":{},"source":"{}")",
-            owner, buffer.stage, shader, buffer.storage ? "storage" : "uniform", buffer.index,
-            buffer.written, buffer.gpu_addr, buffer.device_addr, buffer.bound_size, buffer.size,
-            buffer.gpu_modified, from_host ? "host" : "guest");
-        if (!from_host) {
+            R"("kind":"buffer",{},"stage":{},"shader":"{:016x}","type":"{}","index":{},"written":{},"gpu_addr":"{:#x}","device_addr":"{:#x}","bound_size":{},"size":{},"gpu_modified":{},"pending_cpu_write":{},"source":"{}")",
+            owner, buffer.stage, shader, type, buffer.index, buffer.written, buffer.gpu_addr,
+            buffer.device_addr, buffer.bound_size, buffer.size, buffer.gpu_modified,
+            buffer.pending_cpu_write, has_host ? "host" : "guest");
+        if (!has_host) {
             Enqueue({.tags = std::move(tags), .data = std::move(buffer.guest), .raw = true});
             continue;
         }
-        recorded |= RecordBuffer(buffer.host, buffer.host_offset, buffer.size, std::move(tags));
+        recorded |= RecordBuffer(buffer.host, buffer.host_offset, buffer.size, std::move(tags),
+                                 buffer.gpu_modified ? std::vector<u8>{} : std::move(buffer.guest));
     }
     return recorded;
 }
@@ -634,7 +641,8 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
     return true;
 }
 
-bool FrameDump::RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string tags) {
+bool FrameDump::RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string tags,
+                             std::vector<u8> guest) {
     if (recorded_bytes + size > SIZE_CAP) {
         truncated = true;
         return false;
@@ -675,7 +683,8 @@ bool FrameDump::RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string 
                          .name = {},
                          .tags = std::move(tags),
                          .raw = true,
-                         .bytes = size});
+                         .bytes = size,
+                         .guest = std::move(guest)});
     return true;
 }
 
@@ -700,6 +709,7 @@ void FrameDump::Drain() {
                  .name = std::move(readback.name),
                  .tags = std::move(readback.tags),
                  .data = {mapped.begin(), mapped.end()},
+                 .guest = std::move(readback.guest),
                  .raw = readback.raw});
     }
     readbacks.clear();
@@ -836,15 +846,40 @@ void FrameDump::Write(const Job& job) {
 }
 
 void FrameDump::WriteBuffer(const Job& job) {
-    const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(job.data.data()),
-                                        job.data.size());
-    const std::string name = fmt::format("buffer_{:016x}.bin.zst", hash);
-    if (std::ranges::find(written_buffers, hash) == written_buffers.end()) {
-        written_buffers.push_back(hash);
-        WriteFile(name, Common::Compression::CompressDataZSTDDefault(job.data.data(),
-                                                                     job.data.size()));
+    const auto write = [this](std::span<const u8> data) {
+        const u64 hash =
+            Common::CityHash64(reinterpret_cast<const char*>(data.data()), data.size());
+        const std::string name = fmt::format("buffer_{:016x}.bin.zst", hash);
+        if (std::ranges::find(written_buffers, hash) == written_buffers.end()) {
+            written_buffers.push_back(hash);
+            WriteFile(name, Common::Compression::CompressDataZSTDDefault(data.data(), data.size()));
+        }
+        return std::pair{hash, name};
+    };
+    const auto [hash, name] = write(job.data);
+    std::string compare;
+    if (!job.guest.empty()) {
+        // How far the host bytes the draw read are from what the guest holds now.
+        const size_t common = std::min(job.data.size(), job.guest.size());
+        size_t differing = 0;
+        size_t first_diff = common;
+        for (size_t i = 0; i < common; ++i) {
+            if (job.data[i] != job.guest[i]) {
+                first_diff = std::min(first_diff, i);
+                ++differing;
+            }
+        }
+        differing += std::max(job.data.size(), job.guest.size()) - common;
+        compare = fmt::format(R"(,"host_differs":{})", differing);
+        if (differing != 0) {
+            const auto [guest_hash, guest_name] = write(job.guest);
+            compare += fmt::format(R"(,"first_diff":{},"guest_hash":"{:016x}","guest_raw":"{}")",
+                                   first_diff, guest_hash, guest_name);
+        }
     }
-    manifest << fmt::format(R"({{{},"hash":"{:016x}","raw":"{}"}})", job.tags, hash, name) << '\n';
+    manifest << fmt::format(R"({{{},"hash":"{:016x}","raw":"{}"{}}})", job.tags, hash, name,
+                            compare)
+             << '\n';
 }
 
 void FrameDump::WriteFile(const std::string& name, std::span<const u8> data) {
@@ -914,7 +949,7 @@ void FrameDumpSchedule::Configure(std::string_view at, std::filesystem::path tri
     }
 }
 
-bool FrameDumpSchedule::Arm(bool sampled_, bool buffers_, u64 id, u32 frames) {
+bool FrameDumpSchedule::Arm(bool sampled_, bool buffers_, bool geometry_, u64 id, u32 frames) {
     if (capturing) {
         return false;
     }
@@ -922,6 +957,7 @@ bool FrameDumpSchedule::Arm(bool sampled_, bool buffers_, u64 id, u32 frames) {
     done = false;
     sampled = sampled_;
     buffers = buffers_;
+    geometry = geometry_;
     frames_left = (std::max)(frames, 1u);
     trigger_frame = 0;
     capture_id = id;

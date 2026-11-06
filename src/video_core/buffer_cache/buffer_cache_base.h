@@ -366,9 +366,10 @@ public:
 
     /// Visits the uniform and storage buffers bound for the last draw or dispatch with the cached
     /// host buffer holding each range, if one does, for diagnostics. Nothing is
-    /// created or synchronized. Stage 5 is compute.
+    /// created or synchronized. Stage 5 is compute. With `geometry`, the vertex buffers (stage 6,
+    /// index = binding) and the index buffer (stage 7) of the last draw follow.
     template <typename Func>
-    void ForEachBoundBuffer(bool compute, Func&& func) {
+    void ForEachBoundBuffer(bool compute, Func&& func, bool geometry = false) {
         const auto visit = [&](u32 stage, bool storage, u32 index, bool written,
                                const Binding& binding, u32 size) {
             if (binding.device_addr == 0 || size == 0) {
@@ -413,6 +414,14 @@ public:
                       binding.size);
             });
         }
+        if (!geometry) {
+            return;
+        }
+        for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
+            const Binding& binding = channel_state->vertex_buffers[index];
+            visit(6, false, index, false, binding, binding.size);
+        }
+        visit(7, false, 0, false, channel_state->index_buffer, channel_state->index_buffer.size);
     }
 
     /// Return true when a region is registered on the cache

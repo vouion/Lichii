@@ -91,6 +91,9 @@ TOOLS = [
             "properties": {
                 "sampled": {"type": "boolean"},
                 "buffers": {"type": "boolean"},
+                "geometry": {"type": "boolean",
+                             "description": "With buffers, also every draw's vertex and index "
+                                            "buffers"},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 600},
                 "manifest_lines": {"type": "integer", "minimum": 0, "maximum": 5000},
                 "index": {"type": "boolean"},

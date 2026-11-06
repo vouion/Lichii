@@ -237,7 +237,8 @@ private:
     /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
     void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
     /// Records the uniform and storage buffers of the current draw or dispatch for the frame dump.
-    bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes);
+    bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes,
+                          bool geometry = false);
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;

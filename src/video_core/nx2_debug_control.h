@@ -24,6 +24,8 @@ struct CaptureRequest {
     bool sampled;
     /// The uniform and storage buffers of every draw and dispatch, and dispatch group counts.
     bool buffers;
+    /// With `buffers`, also the vertex and index buffers of every draw.
+    bool geometry = false;
     /// Consecutive frames to capture into one manifest; each starts with a `frame` line.
     u32 frames = 1;
     /// Skip images larger than this many bytes, 0 for no limit, so a capture at a high

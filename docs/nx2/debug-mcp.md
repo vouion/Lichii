@@ -168,7 +168,7 @@ default. The service turns it on at boot. A call without `after` returns the new
 it with `SetGlobalFilter` (`logging.cpp:449`), the call the Qt settings dialog makes. Lines
 already filtered out were never formatted, so the new filter applies only to later lines.
 
-**`capture_frame`** `{sampled?, buffers?, frames?, max_image_mib?, timeout_s?, manifest_lines?, index?}`. It reuses
+**`capture_frame`** `{sampled?, buffers?, geometry?, frames?, max_image_mib?, timeout_s?, manifest_lines?, index?}`. It reuses
 `FrameDump`. `FrameDump::Arm` (`vk_frame_dump.cpp:268`) points the next capture at a fresh directory and resets
 the per-capture counters, so `EDEN_NX2_FRAME_DUMP` is not needed. When to capture is decided by
 `FrameDumpSchedule`, which has no Vulkan state and is unit-tested. It handles both the env
@@ -192,7 +192,13 @@ capturing for N consecutive presents into the same manifest; each frame after th
 by frame whatever order the writer reaches them in (per-frame dedup of buffers and dispatch
 textures restarts at each frame). `max_image_mib: M` skips every image above M MiB with a
 `skipped: size` line, so a capture at 2x docked reaches the UI passes and the present source
-instead of stopping at the 2 GiB cap on the 5120x2880 HDR targets. The adapter-only
+instead of stopping at the 2 GiB cap on the 5120x2880 HDR targets. `geometry: true` adds every draw's
+vertex buffers (stage 6, `index` = binding) and index buffer (stage 7) to the `buffer` entries.
+Each `buffer` entry says whether guest CPU writes to its range were still waiting to be applied
+(`pending_cpu_write`), and when the buffer cache holds the range its bytes are the host copy the
+draw read, compared with the guest bytes: `host_differs` counts the differing bytes and, when
+nonzero, `first_diff`, `guest_hash` and `guest_raw` name the guest copy, so a stale upload shows
+up per draw. The adapter-only
 `capture_image {directory, name}` returns one pass PNG as image content.
 
 **`sample`** `{threads?, seconds?, max_chars?}`. The in-process sampling profiler

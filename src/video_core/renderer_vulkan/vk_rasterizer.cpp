@@ -486,7 +486,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             recorded = frame_dump.NoteSampled(sampled);
         }
         if (frame_dump.CapturingBuffers()) {
-            recorded |= FrameDumpBuffers(false, pipeline->ShaderHashes());
+            recorded |= FrameDumpBuffers(false, pipeline->ShaderHashes(),
+                                         frame_dump.CapturingGeometry());
         }
         if (recorded) {
             scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
@@ -1910,9 +1911,8 @@ void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> 
     }
     static constexpr u64 max_lines = 100000;
     static u64 lines{};
-    buffer_cache.ForEachBoundBuffer(compute, [&](u32 stage, bool storage, u32 index, bool written,
-                                                 const auto& binding, u32 bound_size,
-                                                 const auto*, u32) {
+    const auto visit = [&](u32 stage, bool storage, u32 index, bool written, const auto& binding,
+                           u32 bound_size, const auto*, u32) {
         if (lines > max_lines || !gpu.HasPendingCPUWrites(binding.device_addr, bound_size)) {
             return;
         }
@@ -1926,17 +1926,18 @@ void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> 
                  "device={:#x} size={:#x}",
                  render_trace_frame, compute ? "dispatch" : "draw",
                  program < shader_hashes.size() ? shader_hashes[program] : 0, stage,
-                 storage ? "ssbo" : "cbuf", index, written ? " written" : "", binding.gpu_addr,
-                 binding.device_addr, bound_size);
-    });
+                 stage == 6 ? "vbuf" : stage == 7 ? "ibuf" : storage ? "ssbo" : "cbuf", index,
+                 written ? " written" : "", binding.gpu_addr, binding.device_addr, bound_size);
+    };
+    buffer_cache.ForEachBoundBuffer(compute, visit, !compute);
 }
 
-bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes) {
+bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes,
+                                        bool geometry) {
     static constexpr u32 BUFFER_CAP = 4U << 20;
     std::vector<FrameDump::BoundBuffer> buffers;
-    buffer_cache.ForEachBoundBuffer(compute, [&](u32 stage, bool storage, u32 index, bool written,
-                                                 const auto& binding, u32 bound_size,
-                                                 const auto* host, u32 host_offset) {
+    const auto visit = [&](u32 stage, bool storage, u32 index, bool written, const auto& binding,
+                           u32 bound_size, const auto* host, u32 host_offset) {
         const u32 size = std::min(bound_size, BUFFER_CAP);
         const bool gpu_modified = buffer_cache.IsRegionGpuModified(binding.device_addr, size);
         FrameDump::BoundBuffer& buffer = buffers.emplace_back(FrameDump::BoundBuffer{
@@ -1944,6 +1945,7 @@ bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shade
             .storage = storage,
             .index = index,
             .written = written,
+            .pending_cpu_write = gpu.HasPendingCPUWrites(binding.device_addr, size),
             .gpu_addr = binding.gpu_addr,
             .device_addr = binding.device_addr,
             .bound_size = bound_size,
@@ -1957,7 +1959,8 @@ bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shade
             buffer.guest.resize(size);
             device_memory.ReadBlockUnsafe(binding.device_addr, buffer.guest.data(), size);
         }
-    });
+    };
+    buffer_cache.ForEachBoundBuffer(compute, visit, geometry);
     return frame_dump.NoteBuffers(compute, shader_hashes, buffers);
 }
 
@@ -1978,7 +1981,8 @@ void RasterizerVulkan::TickFrame() {
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             frame_dump.Arm(std::move(capture->directory), capture->sampled, capture->buffers,
-                           capture->id, capture->frames, capture->max_image_bytes);
+                           capture->id, capture->frames, capture->max_image_bytes,
+                           capture->geometry);
         }
         if (const auto change = VideoCore::Nx2Debug::TakeRejectChange()) {
             pipeline_cache.RefreshDebugRejections(change->unrejected);

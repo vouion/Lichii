@@ -307,6 +307,7 @@ json CaptureFrame(ToolState& state, const json& params) {
     std::filesystem::create_directories(directory);
     const bool sampled = params.value("sampled", false);
     const bool buffers = params.value("buffers", false);
+    const bool geometry = params.value("geometry", false);
     const int timeout = Param<int>(params, "timeout_s", 120, 1, 600);
     const u32 frames = Param<u32>(params, "frames", 1, 1, 16);
     const u32 max_image_mib = Param<u32>(params, "max_image_mib", 0, 0, 4096);
@@ -314,6 +315,7 @@ json CaptureFrame(ToolState& state, const json& params) {
                                          .directory = directory,
                                          .sampled = sampled,
                                          .buffers = buffers,
+                                         .geometry = geometry,
                                          .frames = frames,
                                          .max_image_bytes = u64{max_image_mib} << 20});
     const auto finished = VideoCore::Nx2Debug::WaitCapture(id, std::chrono::seconds{timeout});
@@ -355,6 +357,7 @@ json CaptureFrame(ToolState& state, const json& params) {
         {"directory", directory.generic_string()},
         {"sampled", sampled},
         {"buffers", buffers},
+        {"geometry", geometry},
         {"frames", frames},
         {"max_image_mib", max_image_mib},
         {"frame", std::move(frame)},
