@@ -414,10 +414,12 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
 /// adds hashes on any driver ("all" for every pipeline), to look for new ones.
 inline bool BuildsUnoptimized(const Device& device, u64 shader_hash) {
     // The Legend of Zelda: Ocarina of Time (0400486024DEC000), driver 2.0.353 on an RX 6600 XT
-    static constexpr std::array<u64, 3> amd_proprietary{
+    static constexpr std::array<u64, 5> amd_proprietary{
         0x3c2193d0166610b3ULL, // scene lighting fragment shader: access violation at amdvlk64+0xaff2e7
         0xeff3ccbe1438679dULL, // compute shader built as the AV1 intro starts: 6 min (#200)
         0xf9ea14a22394f5b1ULL, // compute shader built as the AV1 intro starts: 18 min (#200)
+        0x9be7607dbc31836bULL, // first gameplay scene, vertex: 11,055 ms build at the cutscene-to-gameplay transition (crash 216, driver 2.0.395)
+        0xdb68c2e27d3bce2fULL, // first gameplay scene, fragment of the same pipeline (crash 216)
     };
     struct Forced {
         bool all = false;
