@@ -7,6 +7,8 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
+#include <string>
 #include <numeric>
 #include <cstdlib>
 #include <limits>
@@ -42,6 +44,51 @@ namespace VideoCommon {
 [[nodiscard]] inline bool NativeDrawDiagnostics() {
     static const bool enabled = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
     return enabled;
+}
+
+/// EDEN_NX2_IMAGE_TRACE=<gpu address>[,...]: log every upload, copy, alias sync, blit, DMA write,
+/// join and delete that touches an image covering one of these addresses (up to
+/// EDEN_NX2_IMAGE_TRACE_LIMIT lines, default 4000).
+[[nodiscard]] inline bool ImageTraced(const ImageBase& image) {
+    static const std::vector<GPUVAddr> addresses = [] {
+        std::vector<GPUVAddr> list;
+        if (const char* value = std::getenv("EDEN_NX2_IMAGE_TRACE")) {
+            for (const char* it = value; *it != '\0';) {
+                char* end = nullptr;
+                const unsigned long long address = std::strtoull(it, &end, 16);
+                if (end == it) {
+                    break;
+                }
+                list.push_back(static_cast<GPUVAddr>(address));
+                it = *end == ',' ? end + 1 : end;
+            }
+        }
+        return list;
+    }();
+    if (addresses.empty()) {
+        return false;
+    }
+    static const u64 limit = [] {
+        const char* value = std::getenv("EDEN_NX2_IMAGE_TRACE_LIMIT");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : 4000ULL;
+    }();
+    static std::atomic<u64> lines{};
+    for (const GPUVAddr address : addresses) {
+        if (address >= image.gpu_addr && address < image.gpu_addr + image.guest_size_bytes) {
+            return lines.fetch_add(1, std::memory_order_relaxed) < limit;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline std::string ImageTraceName(const ImageBase& image, u32 id) {
+    return fmt::format("#{} {:#x}+{:#x} type {} {}x{}x{} layers {} levels {} format {} flags {:#x} "
+                       "tick {} aliases {}",
+                       id, image.gpu_addr, image.guest_size_bytes, static_cast<u32>(image.info.type),
+                       image.info.size.width, image.info.size.height, image.info.size.depth,
+                       image.info.resources.layers, image.info.resources.levels,
+                       static_cast<u32>(image.info.format), static_cast<u32>(image.flags),
+                       image.modification_tick, image.aliased_images.size());
 }
 
 using Tegra::Texture::TICEntry;
@@ -1138,6 +1185,11 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
     }
     runtime.FlushDeferredClear();
     const BlitImages images = *result;
+    if (ImageTraced(slot_images[images.dst_id]) || ImageTraced(slot_images[images.src_id])) {
+        LOG_INFO(HW_GPU, "Image trace: 2D blit from {} into {} frame {}",
+                 ImageTraceName(slot_images[images.src_id], images.src_id.Value()),
+                 ImageTraceName(slot_images[images.dst_id], images.dst_id.Value()), frame_tick);
+    }
     const ImageId dst_id = images.dst_id;
     const ImageId src_id = images.src_id;
 
@@ -1769,6 +1821,10 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         return;
     }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureUpload};
+    if (ImageTraced(image)) {
+        LOG_INFO(HW_GPU, "Image trace: upload from guest memory into {} (frame {})",
+                 ImageTraceName(image, image_id.Value()), frame_tick);
+    }
 
     image.flags &= ~ImageFlagBits::CpuModified;
 
@@ -2599,6 +2655,16 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
     }
     const ImageId image_id = JoinImages(storage_info, gpu_addr, *cpu_addr);
     const Image& image = slot_images[image_id];
+    if (ImageTraced(image)) {
+        LOG_INFO(HW_GPU, "Image trace: created {} (requested {:#x} type {} {}x{} layers {} levels {}) "
+                 "frame {}", ImageTraceName(image, image_id.Value()), gpu_addr,
+                 static_cast<u32>(info.type), info.size.width, info.size.height,
+                 info.resources.layers, info.resources.levels, frame_tick);
+        for (const AliasedImage& aliased : image.aliased_images) {
+            LOG_INFO(HW_GPU, "Image trace:   alias {}",
+                     ImageTraceName(slot_images[aliased.id], aliased.id.Value()));
+        }
+    }
     // Using "image.gpu_addr" instead of "gpu_addr" is important because it might be different
     const auto [it, is_new] = image_allocs_table.try_emplace(image.gpu_addr);
     if (is_new) {
@@ -3048,6 +3114,10 @@ std::pair<u32, u32> TextureCache<P>::PrepareDmaImage(ImageId dst_id, GPUVAddr ba
         runtime.FlushDeferredClear();
     }
     const auto& image = slot_images[dst_id];
+    if (ImageTraced(image)) {
+        LOG_INFO(HW_GPU, "Image trace: DMA {} {} at {:#x} frame {}", mark_as_modified ? "write" : "read",
+                 ImageTraceName(image, dst_id.Value()), base_addr, frame_tick);
+    }
     const auto base = image.TryFindBase(base_addr);
     PrepareImage(dst_id, mark_as_modified, false);
     const auto& new_image = slot_images[dst_id];
@@ -3512,6 +3582,10 @@ void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
 template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
+    if (ImageTraced(image)) {
+        LOG_INFO(HW_GPU, "Image trace: delete {} frame {}", ImageTraceName(image, image_id.Value()),
+                 frame_tick);
+    }
     ++images_deleted;
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
     // a decode was in flight has two, and the first to finish clears the flag. A decode left
@@ -3691,6 +3765,10 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
     if (aliased_images.empty()) {
         return;
     }
+    if (ImageTraced(image)) {
+        LOG_INFO(HW_GPU, "Image trace: alias sync into {} from {} newer aliases (newest tick {})",
+                 ImageTraceName(image, image_id.Value()), aliased_images.size(), most_recent_tick);
+    }
     const bool can_rescale = ImageCanRescale(image);
     if (any_rescaled) {
         if (can_rescale) {
@@ -3795,6 +3873,17 @@ template <class P>
 void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies) {
     Image& dst = slot_images[dst_id];
     Image& src = slot_images[src_id];
+    if (ImageTraced(dst) || ImageTraced(src)) {
+        LOG_INFO(HW_GPU, "Image trace: copy {} regions from {} into {} (first: src layer {} level {} "
+                 "-> dst layer {} level {}, {}x{}) frame {}",
+                 copies.size(), ImageTraceName(src, src_id.Value()), ImageTraceName(dst, dst_id.Value()),
+                 copies.empty() ? 0 : copies[0].src_subresource.base_layer,
+                 copies.empty() ? 0 : copies[0].src_subresource.base_level,
+                 copies.empty() ? 0 : copies[0].dst_subresource.base_layer,
+                 copies.empty() ? 0 : copies[0].dst_subresource.base_level,
+                 copies.empty() ? 0 : copies[0].extent.width,
+                 copies.empty() ? 0 : copies[0].extent.height, frame_tick);
+    }
     if (True(dst.flags & ImageFlagBits::UnwrittenSparse) ||
         True(src.flags & ImageFlagBits::UnwrittenSparse)) {
         return;
