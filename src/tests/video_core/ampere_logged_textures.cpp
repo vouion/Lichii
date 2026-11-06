@@ -492,7 +492,8 @@ TEST_CASE("Half gathers reject reserved second coordinates before scratch copies
             const auto lowered{Shader::Ampere::LowerToMaxwellWith(
                 std::array{uniform_move, instruction, Exit}, high_uniforms, false, false)};
             CAPTURE(high_uniforms, source);
-            CHECK(static_cast<bool>(lowered) == (source < limit || source == 255));
+            // Sources over the uniform bank shadow; the scratch range is never shadowed.
+            CHECK(static_cast<bool>(lowered) == (source < 250 || source == 255));
         }
     }
 }

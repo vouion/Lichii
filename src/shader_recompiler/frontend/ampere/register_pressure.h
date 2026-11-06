@@ -31,6 +31,14 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     std::vector<Operand> operands;
     const auto operand = [&](u32 bit, u32 count = 1) { operands.push_back({bit, count}); };
     const u32 opcode = input.Bits(0, 12);
+    // Registers 250-254 are the lowering's scratch range: TLD4 and SUST.P stage coordinates,
+    // handles and results through R250-R252 and the surrounding machinery saves predicates in
+    // R253 and the uniform predicate output in R254, all inside the copies below. A shadowed
+    // span there would alias those temporaries, so the opcodes entering the shadowing keep
+    // rejecting spans that reach R250, as their pinned tests require. The single-word ALU
+    // expansions stage nothing and keep shadowing all the way to R254.
+    const bool staged_scratch = opcode == 0x589 || opcode == 0x593 || opcode == 0xb9b ||
+                                opcode == 0xb9d || opcode == 0xb63 || opcode == 0xf63;
     switch (opcode) {
     case 0xa02:
     case 0xc3e:
@@ -107,6 +115,42 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(16);
         operand(32);
         break;
+    case 0x589: // SHFL: result in Rd, the shuffled value in Ra, the lane register at bit 32.
+        operand(16);
+        operand(24);
+        operand(32);
+        break;
+    case 0x593: { // SUATOM: result in Rd, the coordinate list in Ra, data at bit 32.
+        const u32 dimension = input.Bits(61, 3);
+        operand(16);
+        operand(24, dimension >= 4 ? 3U : dimension == 3 ? 2U : 1U);
+        operand(32);
+        break;
+    }
+    case 0xb9b: { // SUST.P: data at bit 32, one register per enabled channel, coordinates in Ra.
+        const u32 dimension = input.Bits(61, 3);
+        operand(24, dimension >= 4 ? 3U : dimension == 3 ? 2U : 1U);
+        operand(32, static_cast<u32>(std::popcount(input.Bits(72, 4))));
+        break;
+    }
+    case 0xb9d: // SUST.BA: data at bit 32, the 64-bit coordinate in Ra, Ra+1.
+        operand(24, 2);
+        operand(32);
+        break;
+    case 0xb63:
+    case 0xf63: { // TLD4: x and y in Ra (with the layer or offsets in Ra+1), the second source
+                  // in Rb, results in Rd and the second destination.
+        const u32 components = static_cast<u32>(std::popcount(input.Bits(72, 4)));
+        const bool split = input.Bits(64, 8) != 255, half = input.Bits(79, 1) != 0;
+        const u32 first = half ? 1U : split ? std::min(components, 2U) : components;
+        const u32 second = half ? 1U : components - first;
+        operand(16, first);
+        operand(24, input.Bits(61, 3) == 5 || input.Bits(76, 2) || input.Bits(78, 1) ? 2U : 1U);
+        operand(32);
+        if (split && second)
+            operand(64, second);
+        break;
+    }
     case 0xb6c:
     case 0xf6c: // TXD: results in Rd/Rd+1 and the second pair, coordinates in Ra, gradients in Rb..Rb+3.
         operand(16, 2);
@@ -256,7 +300,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         const u32 reg = input.Bits(bit, 8);
         if (reg == 255)
             continue;
-        if (reg + count > 255 ||
+        if (reg + count > 255 || (staged_scratch && reg + count > 250) ||
             (reg < reserved && reg + count > reserved) ||
             (reg >= reserved && reg / 4 != (reg + count - 1) / 4)) {
             result.valid = false;

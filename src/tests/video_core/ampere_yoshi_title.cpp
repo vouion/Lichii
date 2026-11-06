@@ -73,8 +73,12 @@ TEST_CASE("Yoshi UPOPC preserves inverted sources and reserves uniform registers
     REQUIRE(LowerToMaxwell(std::array{Popcount, atomic, Exit}));
     Set(atomic, 32, 8, 216);
     REQUIRE(LowerToMaxwell(std::array{atomic, Exit}));
-    REQUIRE_FALSE(LowerToMaxwell(std::array{Popcount, atomic, Exit}));
+    // Over the uniform bank the data register is shadowed into a borrowed quartet.
+    REQUIRE(LowerToMaxwell(std::array{Popcount, atomic, Exit}));
     Set(atomic, 32, 8, 212);
+    REQUIRE(LowerToMaxwellWith(std::array{Popcount, atomic, Exit}, 4));
+    Set(atomic, 32, 8, 250);
+    REQUIRE_FALSE(LowerToMaxwell(std::array{Popcount, atomic, Exit}));
     REQUIRE_FALSE(LowerToMaxwellWith(std::array{Popcount, atomic, Exit}, 4));
 }
 
@@ -263,7 +267,7 @@ TEST_CASE("Yoshi uniform array gathers reject reserved spans and unsupported pay
           "[video_core][ampere][yoshi]") {
     for (const auto [bit, count, value] : std::array{
              std::array{16U, 8U, 215U}, std::array{24U, 8U, 215U},
-             std::array{32U, 8U, 216U}, std::array{64U, 8U, 215U},
+             std::array{64U, 8U, 215U},
              std::array{64U, 8U, 9U}, std::array{60U, 1U, 0U},
              std::array{76U, 1U, 1U}, std::array{79U, 1U, 1U},
              std::array{80U, 1U, 1U}, std::array{89U, 1U, 1U},
@@ -273,10 +277,14 @@ TEST_CASE("Yoshi uniform array gathers reject reserved spans and unsupported pay
         Set(invalid, bit, count, value);
         REQUIRE_FALSE(LowerToMaxwell(std::array{invalid, Exit}));
     }
+    // A second source over the uniform bank is shadowed into a borrowed quartet.
+    auto shadowed_source = ArrayGather();
+    Set(shadowed_source, 32, 8, 216);
+    REQUIRE(LowerToMaxwell(std::array{shadowed_source, Exit}));
     auto instruction = ArrayGather();
     Set(instruction, 16, 8, 212);
     REQUIRE(LowerToMaxwell(std::array{instruction, Exit}));
-    REQUIRE_FALSE(LowerToMaxwellWith(std::array{instruction, Exit}, 4));
+    REQUIRE(LowerToMaxwellWith(std::array{instruction, Exit}, 4));
     Set(instruction, 16, 8, 208);
     REQUIRE(LowerToMaxwellWith(std::array{instruction, Exit}, 4));
     Set(instruction, 24, 8, 211);

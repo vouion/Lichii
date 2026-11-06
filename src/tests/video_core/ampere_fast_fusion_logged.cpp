@@ -1598,9 +1598,10 @@ TEST_CASE("Fast Fusion captured register-lane shuffle preserves modes masks and 
         CHECK_FALSE(LowerToMaxwell(std::array{scratch, Exit}));
         CHECK_FALSE(LowerToMaxwell(std::array{UniformBank, scratch, Exit}));
     }
+    // A lane register over the uniform bank shadows; the scratch range stays rejected.
     auto mirrored_lane = CapturedShuffleDown;
     mirrored_lane.words[1] = (mirrored_lane.words[1] & ~255U) | 224U;
-    CHECK_FALSE(LowerToMaxwell(std::array{UniformBank, mirrored_lane, Exit}));
+    CHECK(LowerToMaxwell(std::array{UniformBank, mirrored_lane, Exit}));
     for (u32 bit : {16U, 24U, 32U}) {
         auto zero_register = CapturedShuffleDown;
         zero_register.words[bit / 32] |= 255U << (bit % 32);
