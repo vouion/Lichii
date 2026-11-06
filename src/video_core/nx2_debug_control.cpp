@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <unordered_map>
 
+#include "common/logging.h"
 #include "video_core/nx2_debug_control.h"
 
 namespace VideoCore::Nx2Debug {
@@ -31,6 +33,17 @@ struct State {
 State state;
 std::atomic<bool> pending{};
 std::atomic<bool> any_rejected{};
+/// The buffer download commit period SetPreflushBatching set, in fences; 0 keeps the boot value.
+std::atomic<u32> preflush_period{};
+
+u32 PreflushEnvPeriod() {
+    static const u32 period = [] {
+        const char* value = std::getenv("EDEN_NX2_PREFLUSH_EVERY");
+        const unsigned long count = value != nullptr ? std::strtoul(value, nullptr, 10) : 1;
+        return static_cast<u32>(std::clamp<unsigned long>(count, 1, 4096));
+    }();
+    return period;
+}
 
 void UpdatePending() {
     pending.store(!state.captures.empty() || !state.gpu_reads.empty() || state.reject_pending, std::memory_order_relaxed);
@@ -229,6 +242,28 @@ bool WaitRejectApplied(u64 generation, std::chrono::milliseconds timeout) {
     return state.changed.wait_for(lock, timeout, [generation] {
         return !state.open || state.applied_generation >= generation;
     }) && state.applied_generation >= generation;
+}
+
+u32 SetPreflushBatching(bool enabled, u32 every) {
+    u32 period;
+    if (!enabled) {
+        period = 1;
+    } else if (every != 0) {
+        period = std::clamp<u32>(every, 1, 4096);
+    } else {
+        const u32 boot = PreflushEnvPeriod();
+        period = boot > 1 ? boot : 64;
+    }
+    preflush_period.store(period, std::memory_order_relaxed);
+    LOG_INFO(HW_GPU, "preflush_batching: buffer downloads now commit at {}",
+             period == 1 ? std::string{"every fence"}
+                         : fmt::format("one fence in {} fences", period));
+    return period;
+}
+
+u32 PreflushBatchPeriod() noexcept {
+    const u32 period = preflush_period.load(std::memory_order_relaxed);
+    return period != 0 ? period : PreflushEnvPeriod();
 }
 
 } // namespace VideoCore::Nx2Debug

@@ -148,6 +148,22 @@ TOOLS = [
         },
     },
     {
+        "name": "preflush_batching",
+        "description": "EDEN_NX2_PREFLUSH_EVERY at runtime: flips buffer downloads live between "
+                       "every fence (enabled=false) and one fence in N that has some "
+                       "(enabled=true; N is 'every', else the boot env's period when it "
+                       "batched, else 64). Batched downloads trap their pages, so a CPU read "
+                       "forces its download first; the boot env default applies until flipped.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "boolean"},
+                "every": {"type": "integer", "minimum": 1, "maximum": 4096},
+            },
+            "required": ["enabled"],
+        },
+    },
+    {
         "name": "sample",
         "description": "Sampling profiler: pauses the named host threads about 1000 times a second "
                        "for the given seconds and returns where they were (self, self <- caller, "

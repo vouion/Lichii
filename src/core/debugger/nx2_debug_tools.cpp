@@ -413,6 +413,13 @@ json RejectShaders(ToolState&, const json& params) {
     return result;
 }
 
+json PreflushBatching(ToolState&, const json& params) {
+    const bool enabled = params.value("enabled", true);
+    const u32 every = static_cast<u32>(Param<int>(params, "every", 0, 0, 4096));
+    const u32 period = VideoCore::Nx2Debug::SetPreflushBatching(enabled, every);
+    return {{"enabled", period > 1}, {"every", period}};
+}
+
 json SampleThreads(ToolState& state, const json& params) {
     const std::string threads = params.value("threads", std::string{"GPU,GPUBack"});
     const double seconds = Param<double>(params, "seconds", 10.0, 1.0, 60.0);
@@ -629,6 +636,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"log_filter", handler(LogFilter)},
         {"capture_frame", handler(CaptureFrame)},
         {"reject_shaders", handler(RejectShaders)},
+        {"preflush_batching", handler(PreflushBatching)},
         {"sample", handler(SampleThreads)},
         {"switch", handler(SetSwitch)},
         {"read_memory", handler(ReadMemory)},

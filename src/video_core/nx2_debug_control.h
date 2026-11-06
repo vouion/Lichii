@@ -166,4 +166,12 @@ void NoteRejectApplied(u64 generation);
 /// Server thread: waits until the rasterizer applied the generation.
 [[nodiscard]] bool WaitRejectApplied(u64 generation, std::chrono::milliseconds timeout);
 
+/// Server thread: flips the buffer download cadence live (EDEN_NX2_PREFLUSH_EVERY at boot):
+/// enabled commits buffer downloads at one fence in `every` that has some (`every` 0: the boot
+/// period when it batched, else 64), false at every fence. Logs the change; returns the period
+/// now, in fences (1: every fence).
+u32 SetPreflushBatching(bool enabled, u32 every);
+/// Any thread: the buffer download commit period in fences (1: every fence, the boot default).
+[[nodiscard]] u32 PreflushBatchPeriod() noexcept;
+
 } // namespace VideoCore::Nx2Debug

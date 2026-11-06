@@ -278,10 +278,11 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     const DAddr aligned_size = device_addr_end_aligned - device_addr_start_aligned;
     // The core consumed this trap before GetFlushArea: forget it on every branch (the two
     // Preflushable ones left it set, so the next re-arm was skipped) so the next GPU write
-    // really rearms the core instead of being skipped by the deduplication cache.
+    // really rearms the core instead of being skipped by the deduplication cache. With batched
+    // or disabled fence downloads (DeferredDownloadTraps) a Preflushable mark no longer means
+    // guest memory holds the newest bytes; the dirty check below covers both that case and the
+    // preflush-native case (a read that beats its fence download).
     read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
-    // A mark promises fence downloads keep this page fresh; they do only once they land, so a
-    // still-dirty range takes the flush path below instead of serving the older guest copy.
     if (memory_tracker.IsRegionPreflushable(device_addr, size) &&
         !IsRegionGpuModified(device_addr_start_aligned, aligned_size)) {
         area->preemtive = true;
