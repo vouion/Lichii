@@ -391,13 +391,12 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                                                        gpu_memory->UsesNativeTiling())};
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry{};
-    // A handle whose value is not yet settled at translation time (issue #101's garbage TICs)
-    // indexes past the table or into unwritten pool pages, which read as zero. Keep the invalid
-    // descriptor zeroed and let the converters fall back to an ordinary 2D texture, the same
-    // treatment the runtime gives an unresolved index (a NULL image view), instead of reading
-    // past the table or asserting on untrusted handle-derived state.
-    if (index > tic_limit ||
-        !gpu_memory->IsFullyMappedRange(descriptor_addr, sizeof(entry))) {
+    // Reads past the table's bookkeeping limit are legitimate: the TIC pool extends beyond
+    // tic_limit and holds real descriptors (release builds always read them; the old assert
+    // logged and proceeded). Only truly unmapped memory is unresolved - keep the descriptor
+    // zeroed there and let the converters fall back to an ordinary 2D texture, the same
+    // treatment the runtime gives an unresolved index (a NULL image view).
+    if (!gpu_memory->IsFullyMappedRange(descriptor_addr, sizeof(entry))) {
         static std::atomic<u32> reports{};
         if (reports.fetch_add(1, std::memory_order_relaxed) < 64) {
             LOG_ERROR(HW_GPU,
@@ -407,6 +406,16 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                       descriptor_addr);
         }
         return entry;
+    }
+    if (index > tic_limit) {
+        static std::atomic<u32> beyond{};
+        if (beyond.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_WARNING(HW_GPU,
+                        "Shader TIC past table limit (pool read): program={:#x} stage={} "
+                        "raw={:#x} index={} limit={} descriptor={:#x}",
+                        program_base, static_cast<u32>(stage), raw, index, tic_limit,
+                        descriptor_addr);
+        }
     }
     gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
     if (entry.format.Value() == Tegra::Texture::TextureFormat{} &&
