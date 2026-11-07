@@ -1222,17 +1222,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools,
     std::unique_ptr<EmissionBudget::Reservation> reservation, const char* audit_source) try {
-    if (audit_source && EnvAudit()) {
-        for (size_t i = 0; i < envs.size(); ++i) {
-            if (i < Maxwell::MaxShaderProgram && key.unique_hashes[i] != 0) {
-                LOG_INFO(HW_GPU,
-                         "ENV_AUDIT pipeline={:#016x} stage={} shader={:#016x} cache={} "
-                         "texmap={:#016x}",
-                         key.Hash(), i, key.unique_hashes[i], audit_source,
-                         envs[i]->TexmapHash());
-            }
-        }
-    }
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
@@ -1300,6 +1289,19 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
         if (programs[index].info.requires_layer_emulation) {
             layer_source_program = &programs[index];
+        }
+    }
+    // EDEN_NX2_ENV_AUDIT: after translation - the IR passes populate the env's decision maps,
+    // so a pre-translation fingerprint reads empty maps (the earlier artifact).
+    if (audit_source && EnvAudit()) {
+        for (size_t i = 0; i < envs.size(); ++i) {
+            if (i < Maxwell::MaxShaderProgram && key.unique_hashes[i] != 0) {
+                LOG_INFO(HW_GPU,
+                         "ENV_AUDIT pipeline={:#016x} stage={} shader={:#016x} cache={} "
+                         "texmap={:#016x}",
+                         key.Hash(), i, key.unique_hashes[i], audit_source,
+                         envs[i]->TexmapHash());
+            }
         }
     }
     // A tessellation pipeline the driver would refuse is skipped like a missing mesh pipeline:
@@ -1581,11 +1583,6 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
 ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     ShaderPools& pools, const ComputePipelineCacheKey& key, Shader::Environment& env,
     PipelineStatistics* statistics, bool build_in_parallel, const char* audit_source) try {
-    if (audit_source && EnvAudit()) {
-        LOG_INFO(HW_GPU, "ENV_AUDIT pipeline={:#016x} stage=compute shader={:#016x} cache={} "
-                         "texmap={:#016x}",
-                 key.Hash(), key.unique_hash, audit_source, env.TexmapHash());
-    }
     auto hash = key.Hash();
     if (device.HasBrokenCompute()) {
         LOG_ERROR(Render_Vulkan, "Skipping {:#016x}", hash);
@@ -1602,6 +1599,12 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     }
 
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
+    // EDEN_NX2_ENV_AUDIT: after translation - the IR passes populate the env's decision maps.
+    if (audit_source && EnvAudit()) {
+        LOG_INFO(HW_GPU, "ENV_AUDIT pipeline={:#016x} stage=compute shader={:#016x} cache={} "
+                         "texmap={:#016x}",
+                 key.Hash(), key.unique_hash, audit_source, env.TexmapHash());
+    }
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
