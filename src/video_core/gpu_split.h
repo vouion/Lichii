@@ -250,10 +250,24 @@ public:
     static constexpr size_t SemSlot(u64 addr) noexcept {
         return static_cast<size_t>(((addr >> 2) ^ (addr >> 10) ^ (addr >> 18)) & 63U);
     }
-    /// Records the ring write position of a deferred GPU semaphore or query write.
-    void NoteSemaphoreWrite(u64 addr) noexcept {
-        sem_write_positions[SemSlot(addr)] = write_position;
+    /// Records the ring write position of a deferred GPU semaphore or query write. SEM_FAST=3
+    /// uses the payload (when the release carries one) to satisfy acquires at dispatch time: the
+    /// release's queue position is the ordering point (the work it fences was dispatched before
+    /// it), so an acquire whose condition the noted value meets can complete without draining.
+    void NoteSemaphoreWrite(u64 addr, std::optional<u32> value = std::nullopt) noexcept {
+        const size_t slot = SemSlot(addr);
+        sem_write_positions[slot] = write_position;
+        sem_release_values[slot] = value.value_or(0);
+        sem_release_has_value[slot] = value.has_value();
         last_release_position = write_position;
+    }
+    /// The payload of the most recent noted release to `addr`'s slot, if it had one.
+    [[nodiscard]] std::optional<u32> NotedReleaseValue(u64 addr) const noexcept {
+        const size_t slot = SemSlot(addr);
+        if (!sem_release_has_value[slot]) {
+            return std::nullopt;
+        }
+        return sem_release_values[slot];
     }
     /// Records that a compute or DMA command capable of releasing guest memory was queued.
     void NoteAnyRelease() noexcept {
@@ -355,6 +369,8 @@ private:
     u64 last_sync_position{};
     u64 last_release_position{};
     std::array<u64, 64> sem_write_positions{};
+    std::array<u32, 64> sem_release_values{};
+    std::array<bool, 64> sem_release_has_value{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.

@@ -177,6 +177,11 @@ public:
     /// GetMemoryLayoutSize from the kind map under its lock (the answer with Nx2Perf off).
     size_t GetMemoryLayoutSizeUncached(GPUVAddr gpu_addr) const;
 
+    /// The current page-table serial: bumped on every mapping change. Binding memos key on it.
+    [[nodiscard]] u64 MapSerial() const noexcept {
+        return map_serial.load(std::memory_order_acquire);
+    }
+
     void FlushCaching();
 
     /// Leaves the caches' invalidation of a range already written for the next FlushCaching

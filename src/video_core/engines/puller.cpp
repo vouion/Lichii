@@ -102,6 +102,16 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
             const bool page_gpu = Tegra::Nx2IsGpuWritten(*sem_device);
             if (!page_gpu || !dma_pusher.rasterizer->MustFlushRegion(
                                  *sem_device, sizeof(u32), VideoCommon::CacheType::BufferCache)) {
+                // SEM_FAST=3: the front's own release note is authoritative. The release's
+                // queue position is the ordering point - the work it fences was dispatched
+                // before it - so an acquire whose condition the noted payload meets completes
+                // at dispatch time instead of draining the back to the release's record.
+                if (VideoCore::Nx2Debug::g_sem_fast.load(std::memory_order_relaxed) >= 3) {
+                    if (const auto noted = split.NotedReleaseValue(pending_acquire->address);
+                        noted && pending_acquire->Matches(*noted)) {
+                        return true;
+                    }
+                }
                 split.WaitForSemaphore(pending_acquire->address, VideoCommon::DrainSite::Acquire);
                 if (pending_acquire->Matches(
                         dma_pusher.memory_manager.Read<u32>(pending_acquire->address))) {
@@ -298,6 +308,15 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                 if (!page_gpu ||
                     !dma_pusher.rasterizer->MustFlushRegion(*sem_device, sizeof(u32),
                                                             VideoCommon::CacheType::BufferCache)) {
+                    // SEM_FAST=3: a noted release whose payload satisfies the acquire completes
+                    // it at dispatch time (submission-ordering: the fenced work was dispatched
+                    // before the release), instead of draining the back to the release's record.
+                    if (VideoCore::Nx2Debug::g_sem_fast.load(std::memory_order_relaxed) >= 3) {
+                        if (const auto noted = split.NotedReleaseValue(acquire.address);
+                            noted && acquire.Matches(*noted)) {
+                            return;
+                        }
+                    }
                     split.WaitForSemaphore(acquire.address, VideoCommon::DrainSite::Acquire);
                     if (acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
                         return;
@@ -511,8 +530,11 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
         if (static_cast<GpuSemaphoreOperation>(regs.semaphore_trigger & 0xF) ==
             GpuSemaphoreOperation::WriteLong) {
             const bool fence = g_nx2_ampere && (regs.semaphore_trigger & (1U << 24)) != 0;
+            // The written word is the sequence/payload either way; SEM_FAST=3 needs the value
+            // on non-fence releases too (the release note is then authoritative for acquires).
             NoteSemaphoreWrite(dma_pusher, regs.semaphore_address.SemaphoreAddress(),
-                               fence ? std::optional<u32>{regs.semaphore_sequence} : std::nullopt);
+                               std::optional<u32>{regs.semaphore_sequence});
+            (void)fence;
         }
         break;
     }

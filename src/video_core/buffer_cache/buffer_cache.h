@@ -2834,6 +2834,27 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         return NULL_BINDING;
     }
 
+    // The draw path re-binds the same storage pointers tens of thousands of times a second and
+    // the binding is a pure function of (pointer word, flags, mapping): memoize it. The pointer
+    // word is re-read every call (the game writes these tables) and the mapping serial is in the
+    // key (OoT churns its page table ~100/s), so a stale entry can only be served when all three
+    // inputs still match - the same conditions under which the recomputation would return it.
+    struct MemoEntry {
+        u64 key;
+        GPUVAddr gpu_addr;
+        u64 map_serial;
+        Binding out;
+    };
+    static thread_local std::array<MemoEntry, 256> memo{};
+    const u64 map_serial = gpu_memory->MapSerial();
+    const u64 key = (ssbo_addr * 0x9E3779B97F4A7C15ULL) ^
+                    (u64{is_written} << 1) ^ (u64{native_pointer} << 2) ^
+                    (u64{table_pointer} << 3) ^ (u64{compute} << 4);
+    MemoEntry& entry = memo[(key ^ (gpu_addr >> 12)) & 255];
+    if (entry.key == key && entry.gpu_addr == gpu_addr && entry.map_serial == map_serial) {
+        return entry.out;
+    }
+
     u32 size = [&]() {
         const u32 memory_layout_size =
             static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
@@ -2914,6 +2935,7 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         .size = binding_size,
         .buffer_id = BufferId{},
     };
+    entry = MemoEntry{key, gpu_addr, map_serial, binding};
     return binding;
 }
 
