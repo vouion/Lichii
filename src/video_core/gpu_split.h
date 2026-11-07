@@ -277,6 +277,22 @@ public:
     [[nodiscard]] u64 LastReleasePosition() const noexcept {
         return last_release_position;
     }
+    /// The current dispatch write position (the front's note cursor) - macro-read caches key on it.
+    [[nodiscard]] u64 WritePositionNow() const noexcept {
+        return write_position;
+    }
+    /// Whether a write to [begin, begin+size) was noted after `since` (queued or landed). The
+    /// pending ring holds the last 8192 writes; `since` values come from moments ago, so the
+    /// ring's window (hundreds of ms of writes) always covers the gap being asked about.
+    [[nodiscard]] bool AnyWriteToSince(u64 begin, u64 size, u64 since) const noexcept {
+        const u64 end = size == ~u64{0} ? ~u64{0} : begin + size;
+        for (const PendingWrite& w : pending_writes) {
+            if (w.position > since && w.begin < end && begin < w.end) {
+                return true;
+            }
+        }
+        return false;
+    }
     /// Waits until the back thread has executed any queued semaphore write to the slot of `addr`.
     bool WaitForSemaphore(u64 addr, DrainSite site = DrainSite::Acquire) {
         return WaitFor(sem_write_positions[SemSlot(addr)], site);

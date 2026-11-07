@@ -1544,6 +1544,41 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     const u32 ram = fs.regs[0x156];
     const u32 words = std::min<u32>(count, 0x1000);
     const size_t read_bytes = size_t{words} * sizeof(u32);
+    // The macros re-read the same guest tables thousands of times a second; between writes the
+    // words are stable, so serve them from the cache when no write has been noted to the range
+    // since the capture (queued or landed - the ring covers far more than one inter-read gap).
+    // This is the readback/sync stall class (the hitch census's top class at ~39% of stall
+    // time): the default path drained the whole back per read to guarantee freshness.
+    struct MacroReadEntry {
+        GPUVAddr source{};
+        u32 words{};
+        u64 captured_at{};
+        std::array<u32, 256> data{};
+    };
+    static thread_local std::array<MacroReadEntry, 32> macro_read_cache{};
+    if (words <= 256) {
+        MacroReadEntry& cached = macro_read_cache[(source >> 7) & 31];
+        if (cached.source == source && cached.words == words && cached.captured_at != 0 &&
+            !split.AnyWriteToSince(source, read_bytes, cached.captured_at)) {
+            for (u32 i = 0; i < words; ++i) {
+                if (method == 0x158) {
+                    fs.parameters.push_back(cached.data[i]);
+                } else if (ram + i < native_data_ram.size()) {
+                    native_data_ram[ram + i] = cached.data[i];
+                }
+            }
+            return;
+        }
+    }
+    const auto macro_read_cache_fill = [&](const u32* data) {
+        if (words <= 256) {
+            MacroReadEntry& e = macro_read_cache[(source >> 7) & 31];
+            e.source = source;
+            e.words = words;
+            e.captured_at = split.WritePositionNow();
+            std::memcpy(e.data.data(), data, read_bytes);
+        }
+    };
     std::vector<u32> diag_before;
     if (Tegra::Nx2CmdPageDiag::g_enabled) {
         diag_before.resize(words);
@@ -1629,6 +1664,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
                              differences);
                 }
             }
+            macro_read_cache_fill(fast.data());
             for (u32 i = 0; i < words; ++i) {
                 if (method == 0x158) {
                     fs.parameters.push_back(fast[i]);
@@ -1687,8 +1723,18 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         },
         VideoCommon::DrainSite::MacroDmaFlush);
     u32 changed{};
+    MacroReadEntry* fallthrough_entry =
+        words <= 256 ? &macro_read_cache[(source >> 7) & 31] : nullptr;
+    if (fallthrough_entry) {
+        fallthrough_entry->source = source;
+        fallthrough_entry->words = words;
+        fallthrough_entry->captured_at = split.WritePositionNow();
+    }
     for (u32 i = 0; i < words; ++i) {
         const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
+        if (fallthrough_entry) {
+            fallthrough_entry->data[i] = word;
+        }
         if (method == 0x158) {
             fs.parameters.push_back(word);
         } else if (ram + i < native_data_ram.size()) {
