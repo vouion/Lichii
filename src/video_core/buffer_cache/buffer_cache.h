@@ -2863,18 +2863,6 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             // A native (Switch 2) compute program's pointer is bare: the word after it is another
             // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it
             // as one bound Fortune's Weave's DLSS input features to 266 bytes and dropped the rest.
-            // Read-only pointers may still extend: OoT's light probes are SH records 100+ MiB past
-            // a bare pointer, and the 8 MiB cap truncated every fragment-stage probe read (63
-            // bindings at exactly 8 MiB in the capture) so the fog and water read garbage - the
-            // green wash. EDEN_NX2_NATIVE_PTR_MIB overrides the read cap (8 restores the old one).
-            if (!is_written) {
-                static const u32 native_read_cap = [] {
-                    const char* const value = std::getenv("EDEN_NX2_NATIVE_PTR_MIB");
-                    const u64 mib = value == nullptr ? 256 : std::strtoull(value, nullptr, 10);
-                    return static_cast<u32>((mib == 0 ? 256 : mib) << 20);
-                }();
-                return (std::min)(memory_layout_size, native_read_cap);
-            }
             return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
         }
         const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
