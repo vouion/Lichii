@@ -1558,7 +1558,11 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
     }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         std::scoped_lock lock{buffer_cache.mutex};
-        buffer_cache.DownloadMemory(addr, size);
+        // The copy may already be executed and only waiting for its pop; hurrying the pop
+        // (memcpy work) avoids the forced download's chunk-tail wait entirely.
+        if (!buffer_cache.HurryPendingDownloads(addr, size)) {
+            buffer_cache.DownloadMemory(addr, size);
+        }
     }
     if ((True(which & VideoCommon::CacheType::QueryCache))) {
         query_cache.FlushRegion(addr, size);

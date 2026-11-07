@@ -260,6 +260,10 @@ public:
 
     void DownloadMemory(DAddr device_addr, u64 size);
 
+    /// Hurries the staged fence downloads' pop for a range and reports whether it is then free
+    /// of GPU data (the caller only forces a download when the copies have not run yet).
+    bool HurryPendingDownloads(DAddr device_addr, u64 size);
+
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 
     /// Without downloads at every fence, a guest CPU read is the only way GPU-written buffer

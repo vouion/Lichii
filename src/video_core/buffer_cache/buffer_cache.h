@@ -971,6 +971,18 @@ void BufferCache<P>::PopAsyncFlushes() {
     PopAsyncBuffers();
 }
 
+/// The staged fence downloads are copies whose buffers already executed on the GPU; their
+/// application to guest memory pops at the release thread's pace. A read that beats the pop
+/// hurries it (this is memcpy work) and reports whether the range is then free of GPU data -
+/// the caller forces a download (and its chunk-tail wait) only when the copies have not run.
+template <class P>
+bool BufferCache<P>::HurryPendingDownloads(DAddr addr, u64 size) {
+    while (!async_buffers.empty() && IsRegionGpuModified(addr, size)) {
+        PopAsyncBuffers();
+    }
+    return !IsRegionGpuModified(addr, size);
+}
+
 template <class P>
 void BufferCache<P>::PopAsyncBuffers() {
     if (async_buffers.empty()) {
