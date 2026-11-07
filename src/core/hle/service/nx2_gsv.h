@@ -1756,6 +1756,9 @@ private:
         // EDEN_NX2_FRAMES_AHEAD=1 always waits for the previous frame, =0 always for this one.
         static const int frames_ahead_setting = [] {
             const char* value = std::getenv("EDEN_NX2_FRAMES_AHEAD");
+            if (value != nullptr) {
+                LOG_INFO(Service, "EDEN_NX2_FRAMES_AHEAD={} active", value);
+            }
             return value == nullptr ? -1 : value[0] == '1' ? 1 : 0;
         }();
         // Donkey Kong Bananza's channels wait on each other every frame, so it always ran a frame

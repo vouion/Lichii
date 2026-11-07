@@ -242,8 +242,14 @@ void Maxwell3D::ProcessMacro(Core::System& system, u32 method, const u32* base_s
     // the parameters in place (RefreshParameters), so it keeps the vector.
     // EDEN_NX2_MACRO_COPY=1: always use the vector (for comparisons).
     static const bool always_copy = std::getenv("EDEN_NX2_MACRO_COPY") != nullptr;
+    // EDEN_NX2_MACRO_REFRESH=1: re-read memory-backed macro parameters when the macro runs
+    // instead of trusting the arrival-time snapshot (issue 619: Ocarina of Time's vegetation
+    // draws consume GPU-written culling results, and in Fast GPU mode the snapshot can predate
+    // the GPU's write, so the draw comes out white). RefreshParametersImpl writes into
+    // macro_params, which the stack path never fills, so the refresh forces the vector path.
+    static const bool refresh_parameters = std::getenv("EDEN_NX2_MACRO_REFRESH") != nullptr;
     if (is_last_call && macro_params.empty() && amount <= 64 && !always_copy &&
-        !Settings::IsGPULevelHigh()) {
+        !refresh_parameters && !Settings::IsGPULevelHigh()) {
         std::array<u32, 64> parameters;
         std::copy_n(base_start, amount, parameters.begin());
         ConsumeSink(system);
@@ -265,8 +271,15 @@ void Maxwell3D::ProcessMacro(Core::System& system, u32 method, const u32* base_s
 }
 
 void Maxwell3D::RefreshParametersImpl() {
-    if (!Settings::IsGPULevelHigh()) {
+    static const bool refresh_parameters = std::getenv("EDEN_NX2_MACRO_REFRESH") != nullptr;
+    if (!Settings::IsGPULevelHigh() && !refresh_parameters) {
         return;
+    }
+    if (refresh_parameters) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed)) {
+            LOG_INFO(HW_GPU, "EDEN_NX2_MACRO_REFRESH=1: re-reading macro parameters at the call");
+        }
     }
     size_t current_index = 0;
     for (auto& segment : macro_segments) {
