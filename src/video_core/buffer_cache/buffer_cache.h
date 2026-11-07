@@ -977,7 +977,10 @@ void BufferCache<P>::PopAsyncFlushes() {
 /// the caller forces a download (and its chunk-tail wait) only when the copies have not run.
 template <class P>
 bool BufferCache<P>::HurryPendingDownloads(DAddr addr, u64 size) {
-    while (!async_buffers.empty() && IsRegionGpuModified(addr, size)) {
+    // Bounded: an unbounded drain while holding the buffer mutex is itself a stall (the tail
+    // regressed when it purged the whole pending set). Four pops cover the typical lag; the
+    // forced download handles the rest.
+    for (int i = 0; i < 4 && !async_buffers.empty() && IsRegionGpuModified(addr, size); ++i) {
         PopAsyncBuffers();
     }
     return !IsRegionGpuModified(addr, size);
