@@ -1795,7 +1795,12 @@ void RasterizerVulkan::WaitForIdle() {
 
     query_cache.NotifyWFI();
 
-    if (device.IsMoltenVK() && scheduler.IsRenderPassActive()) {
+    // A wait-for-interrupt is an ordering point, not a pass boundary: defer the fragment barrier
+    // and signal ordering instead of ending the render pass (the event form must run outside a
+    // pass and its exit costs a full pass restart - 748 of the ~2631 render-pass ends per second
+    // came from here). The MoltenVK path proved the deferral's semantics; the deferred barrier
+    // lands at the next boundary and the queue's submission order carries the sync.
+    if (scheduler.IsRenderPassActive()) {
         scheduler.DeferFragmentBarrier();
         fence_manager.SignalOrdering();
         return;
