@@ -6,7 +6,10 @@
 
 #pragma once
 
+#include <source_location>
+
 #include <array>
+#include <cstdio>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -131,17 +134,26 @@ private:
     VkResult result;
 };
 
-/// Throws a Vulkan exception if result is not success.
-inline void Check(VkResult result) {
+/// Throws a Vulkan exception if result is not success. The failing call site is printed to
+/// stderr first (VK_PROBE line: the exact call behind a driver-level init failure).
+inline void Check(VkResult result,
+                  const std::source_location loc = std::source_location::current()) {
     if (result != VK_SUCCESS) {
+        std::fprintf(stderr, "VK_PROBE %s:%u (%s) -> %d\n", loc.file_name(), loc.line(),
+                     loc.function_name(), static_cast<int>(result));
+        std::fflush(stderr);
         throw Exception(result);
     }
 }
 
 /// Throws a Vulkan exception if result is an error.
 /// @return result
-inline VkResult Filter(VkResult result) {
+inline VkResult Filter(VkResult result,
+                       const std::source_location loc = std::source_location::current()) {
     if (result < 0) {
+        std::fprintf(stderr, "VK_PROBE %s:%u (%s) -> %d\n", loc.file_name(), loc.line(),
+                     loc.function_name(), static_cast<int>(result));
+        std::fflush(stderr);
         throw Exception(result);
     }
     return result;
