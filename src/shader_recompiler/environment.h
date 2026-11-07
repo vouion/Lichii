@@ -85,6 +85,11 @@ public:
     /// Native argument tables mix pointers with scalars (sizes, strides).
     [[nodiscard]] virtual bool IsCbufStorageBufferPointer(u32, u32) { return true; }
 
+    /// EDEN_NX2_ENV_AUDIT: fingerprint of this environment's baked texture/descriptor decisions
+    /// (texture types, pixel formats, cbuf values, storage pointer kinds). Compared across runs
+    /// to separate translation-bake bugs from timing bugs.
+    [[nodiscard]] virtual u64 TexmapHash() const { return 0; }
+
     /// Native programs: whether the 8 bytes at `indirect` past the pointer at (index, offset) are
     /// a mapped GPU address (a pointer table the program loads its buffer pointer from).
     [[nodiscard]] virtual bool IsCbufIndirectStorageBufferPointer(u32, u32, u32) {

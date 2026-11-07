@@ -145,7 +145,8 @@ private:
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
-        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
+        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
+        const char* audit_source = nullptr);
 
     ComputePipelineCacheEntry CreateComputePipeline(const ComputePipelineCacheKey& key,
                                                      const ShaderInfo* shader);
@@ -154,7 +155,8 @@ private:
                                                      const ComputePipelineCacheKey& key,
                                                      Shader::Environment& env,
                                                      PipelineStatistics* statistics,
-                                                     bool build_in_parallel);
+                                                     bool build_in_parallel,
+                                                     const char* audit_source = nullptr);
 
     void SerializeVulkanPipelineCache(const std::filesystem::path& filename,
                                       const vk::PipelineCache& pipeline_cache, u32 cache_version);

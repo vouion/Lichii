@@ -737,6 +737,13 @@ bool PreloadAllPipelines() {
     }();
     return all;
 }
+
+/// EDEN_NX2_ENV_AUDIT: log every pipeline build's baked texture/descriptor fingerprint and
+/// whether it came from the disk cache, so two runs' bakes can be compared directly.
+bool EnvAudit() {
+    static const bool audit = std::getenv("EDEN_NX2_ENV_AUDIT") != nullptr;
+    return audit;
+}
 } // Anonymous namespace
 
 PipelineCache::~PipelineCache() {
@@ -892,7 +899,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
         workers.QueueWork([this, key, env_ = std::move(env), &state, &callback]() mutable {
             ShaderPools pools;
-            auto entry{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
+            auto entry{CreateComputePipeline(pools, key, env_, state.statistics.get(), false,
+                                             "disk")};
             std::scoped_lock lock{state.mutex};
             if (entry.pipeline) {
                 compute_cache.emplace(key, std::move(entry));
@@ -912,7 +920,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 env_ptrs.push_back(&env);
             }
             auto pipeline{CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs),
-                                                 state.statistics.get(), false)};
+                                                 state.statistics.get(), false, nullptr, nullptr,
+                                                 "disk")};
 
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
@@ -1212,7 +1221,18 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools,
-    std::unique_ptr<EmissionBudget::Reservation> reservation) try {
+    std::unique_ptr<EmissionBudget::Reservation> reservation, const char* audit_source) try {
+    if (audit_source && EnvAudit()) {
+        for (size_t i = 0; i < envs.size(); ++i) {
+            if (i < Maxwell::MaxShaderProgram && key.unique_hashes[i] != 0) {
+                LOG_INFO(HW_GPU,
+                         "ENV_AUDIT pipeline={:#016x} stage={} shader={:#016x} cache={} "
+                         "texmap={:#016x}",
+                         key.Hash(), i, key.unique_hashes[i], audit_source,
+                         envs[i]->TexmapHash());
+            }
+        }
+    }
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
@@ -1494,7 +1514,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     }
     ShaderPools& pools = emit_pools ? *emit_pools : main_pools;
     auto pipeline{CreateGraphicsPipeline(pools, graphics_key, environments.Span(), nullptr, true,
-                                         std::move(emit_pools), std::move(reservation))};
+                                         std::move(emit_pools), std::move(reservation), "fresh")};
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }
@@ -1535,7 +1555,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     env.SetCachedSize(shader->size_bytes);
 
     main_pools.ReleaseContents();
-    auto entry{CreateComputePipeline(main_pools, key, env, nullptr, true)};
+    auto entry{CreateComputePipeline(main_pools, key, env, nullptr, true, "fresh")};
     if (const char* directory = std::getenv("EDEN_NX2_SHADER_DUMP");
         directory && !entry.pipeline && env.CanBeSerialized()) {
         const auto path = std::filesystem::path{directory} /
@@ -1560,7 +1580,12 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
 
 ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     ShaderPools& pools, const ComputePipelineCacheKey& key, Shader::Environment& env,
-    PipelineStatistics* statistics, bool build_in_parallel) try {
+    PipelineStatistics* statistics, bool build_in_parallel, const char* audit_source) try {
+    if (audit_source && EnvAudit()) {
+        LOG_INFO(HW_GPU, "ENV_AUDIT pipeline={:#016x} stage=compute shader={:#016x} cache={} "
+                         "texmap={:#016x}",
+                 key.Hash(), key.unique_hash, audit_source, env.TexmapHash());
+    }
     auto hash = key.Hash();
     if (device.HasBrokenCompute()) {
         LOG_ERROR(Render_Vulkan, "Skipping {:#016x}", hash);

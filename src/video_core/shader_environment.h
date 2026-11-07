@@ -45,6 +45,36 @@ struct LoweredNativeCode {
     u32 texture_bound = ~0U;
 };
 
+/// EDEN_NX2_ENV_AUDIT: order-independent fingerprint of the maps a translation bakes its texture
+/// and descriptor decisions into. Two bakes of one program compare equal iff every decision does.
+template <typename TypesMap, typename FormatsMap, typename CbufMap, typename StorageMap>
+[[nodiscard]] inline u64 ShaderEnvironmentTexmapHash(const TypesMap& texture_types,
+                                                     const FormatsMap& texture_pixel_formats,
+                                                     const CbufMap& cbuf_values,
+                                                     const StorageMap& storage_pointer_types) {
+    u64 h = 14695981039346656037ULL;
+    const auto mix = [&h](u64 x) {
+        h ^= x;
+        h *= 1099511628211ULL;
+    };
+    const auto fold = [&mix](const auto& map) {
+        std::vector<u64> keys;
+        keys.reserve(map.size());
+        for (const auto& [key, value] : map) {
+            keys.push_back((static_cast<u64>(key) << 1) ^ static_cast<u64>(value));
+        }
+        std::sort(keys.begin(), keys.end());
+        for (const u64 entry : keys) {
+            mix(entry);
+        }
+    };
+    fold(texture_types);
+    fold(texture_pixel_formats);
+    fold(cbuf_values);
+    fold(storage_pointer_types);
+    return h;
+}
+
 class GenericEnvironment : public Shader::Environment {
 public:
     explicit GenericEnvironment() = default;
@@ -127,6 +157,11 @@ protected:
     ::Common::unordered_map<u64, u32> cbuf_values;
     ::Common::unordered_map<u64, u8> storage_pointer_types; ///< IsCbufStorageBufferPointer answers
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
+
+    [[nodiscard]] u64 TexmapHash() const override {
+        return ShaderEnvironmentTexmapHash(texture_types, texture_pixel_formats, cbuf_values,
+                                           storage_pointer_types);
+    }
 
     u32 local_memory_size{};
     u32 texture_bound{};
@@ -266,6 +301,12 @@ private:
     ::Common::unordered_map<u64, u32> cbuf_values;
     ::Common::unordered_map<u64, u8> storage_pointer_types;
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
+
+    [[nodiscard]] u64 TexmapHash() const override {
+        return ShaderEnvironmentTexmapHash(texture_types, texture_pixel_formats, cbuf_values,
+                                           storage_pointer_types);
+    }
+
     std::array<u32, 3> workgroup_size{};
     u32 local_memory_size{};
     u32 shared_memory_size{};
