@@ -2850,8 +2850,11 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                 const u64 mib = value == nullptr ? 256 : std::strtoull(value, nullptr, 10);
                 return static_cast<u32>((mib == 0 ? 256 : mib) << 20);
             }();
-            return (std::min)(memory_layout_size,
-                              compute ? compute_cap : static_cast<u32>(64_MiB));
+            // The raised cap serves BOTH stages: OoT's fragment probe reads resolve to the same
+            // SH record pools as the compute ones (104-122 MiB past the pointer), and the 64 MiB
+            // graphics cap alone kept the green wash alive (the probe SSBOs' reads past 64 MiB
+            // returned zero where the sky/blue term lives). Writes keep the tight cap above.
+            return (std::min)(memory_layout_size, compute_cap);
         }
         // A native (Switch 2) compute program's pointer is bare: the word after it is another
         // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it as
