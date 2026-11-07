@@ -44,6 +44,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
@@ -663,6 +664,14 @@ private:
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling();
     }
 
+    /// How native titles treat a guest read of GPU-written pages (EDEN_NX2_PREFLUSH_NATIVE):
+    /// 0 = trap-and-flush (one blocking round trip per read), 1 = mark Preflushable and keep the
+    /// page read-trapped (the download lands at the fence; GetFlushArea's dirty check forces it
+    /// early when a read beats the fence), 2 = mark without the trap (A/B only).
+    static int PreflushNative() {
+        return VideoCore::Nx2Debug::g_preflush_native.load(std::memory_order_relaxed);
+    }
+
     /// Whether a GPU write to this range is copied back at the next fence. Ranges the guest CPU
     /// has read (Preflushable, set by the first reactive flush) always are: later reads skip the
     /// flush and rely on these downloads, e.g. collision meshes skinned by compute shaders.
@@ -700,7 +709,7 @@ private:
                 queued += upper - lower;
             }
         });
-        if (queued < size) {
+        if (queued < size || PreflushNative() == 1) {
             ArmReadTraps(device_addr, size);
         }
         if (Nx2DownloadTrace::g_enabled && queued != 0) [[unlikely]] {
