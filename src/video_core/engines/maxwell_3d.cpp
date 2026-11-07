@@ -274,6 +274,12 @@ void Maxwell3D::RefreshParametersImpl() {
     if (!Settings::IsGPULevelHigh() && !refresh_parameters) {
         return;
     }
+    if (refresh_parameters) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed)) {
+            LOG_INFO(HW_GPU, "EDEN_NX2_MACRO_REFRESH=1: re-reading macro parameters at the call");
+        }
+    }
     size_t current_index = 0;
     for (auto& segment : macro_segments) {
         if (segment.first == 0) {
