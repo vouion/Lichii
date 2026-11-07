@@ -4019,6 +4019,20 @@ bool Image::ScaleUp(bool ignore) {
         return false;
     }
     ASSERT(info.type != ImageType::Linear);
+    {
+        const bool is_2d = info.type == ImageType::e2D;
+        const u32 scaled_width = resolution.ScaleUp(info.size.width);
+        const u32 scaled_height = is_2d ? resolution.ScaleUp(info.size.height) : info.size.height;
+        // A scaled image past the device's 16384 guarantee or the 2^28-texel budget of the
+        // image math must not exist: the allocator falls back to an unbacked sparse image and
+        // binding it then loses the device (the 1.5x crash: a 12288^2 D16 scaled to 18432^2).
+        // Keep such images at native size - the framework already handles images that do not
+        // rescale (ImageCanRescale / the Rescaled flag).
+        if (scaled_width > 16384 || scaled_height > 16384 ||
+            u64{scaled_width} * scaled_height > (u64{1} << 28)) {
+            return false;
+        }
+    }
     flags |= ImageFlagBits::Rescaled;
     has_scaled = true;
     if (!scaled_image) {
