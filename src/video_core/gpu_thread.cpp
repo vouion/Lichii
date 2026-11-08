@@ -127,6 +127,11 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
 #endif
                         std::this_thread::yield();
                         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
+                    } else if (idle_for < std::chrono::seconds{2}) {
+                        // Ocarina suspends ~330 times a second and its present waits for the work
+                        // behind those acquires: a 50 us poll sees the release far sooner than a
+                        // 1 ms sleep (measured ~11% faster in Kokiri). Long waits fall through.
+                        std::this_thread::sleep_for(std::chrono::microseconds{50});
                     } else {
                         state.pending_wake.WaitFor(std::chrono::milliseconds{1});
                     }
