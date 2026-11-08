@@ -181,6 +181,7 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
     Nx2NoteListHostWrite(device_addr, size);
+    guest_write_generations.NoteWrite(device_addr, size);
     // The written range lies within its pages: when they hold no GPU-written data, both lookups
     // below find nothing, so one lookup answers them.
     if (keep_page_gpu_data) {
@@ -235,6 +236,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
 
 template <class P>
 void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
+    guest_write_generations.NoteWrite(device_addr, size);
     const bool is_dirty = IsRegionRegistered(device_addr, size);
     if (!is_dirty) {
         return;
@@ -255,6 +257,7 @@ void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
 
 template <class P>
 bool BufferCache<P>::OnCPUWrite(DAddr device_addr, u64 size) {
+    guest_write_generations.NoteWrite(device_addr, size);
     const bool is_dirty = IsRegionRegistered(device_addr, size);
     if (!is_dirty) {
         return false;
@@ -381,6 +384,7 @@ void BufferCache<P>::DownloadRangesMemory(std::span<const std::pair<DAddr, u64>>
     const u8* const mapped_memory = download_staging.mapped_span.data();
     for (const Download& download : downloads) {
         const DAddr device_addr = slot_buffers[download.buffer_id].CpuAddr() + download.copy.src_offset;
+        guest_write_generations.NoteWrite(device_addr, download.copy.size);
         device_memory.WriteBlockUnsafe(
             device_addr, mapped_memory + (download.copy.dst_offset - download_staging.offset),
             download.copy.size);
@@ -464,6 +468,7 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
 
     Tegra::Memory::DeviceGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::UnsafeReadWrite>
         tmp(device_memory, *cpu_src_address, amount, &tmp_buffer);
+    guest_write_generations.NoteWrite(*cpu_dest_address, amount);
     tmp.SetAddressAndSize(*cpu_dest_address, amount);
     return true;
 }
@@ -482,6 +487,8 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
     const size_t size = amount * sizeof(u32);
     ClearDownload(*cpu_dst_address, size);
     gpu_modified_ranges.Subtract(*cpu_dst_address, size);
+    // Conservative: the clear discards guest contents; treat the range as written.
+    guest_write_generations.NoteWrite(*cpu_dst_address, size);
 
     const BufferId buffer = FindBuffer(*cpu_dst_address, static_cast<u32>(size), false);
     Buffer& dest_buffer = slot_buffers[buffer];
@@ -525,6 +532,7 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
     case ObtainBufferOperation::DiscardWrite: {
         ClearDownload(device_addr, size);
         gpu_modified_ranges.Subtract(device_addr, size);
+        guest_write_generations.NoteWrite(device_addr, size);
         break;
     }
     default:
@@ -1007,6 +1015,7 @@ void BufferCache<P>::PopAsyncBuffers() {
         // Only what no write replaced since the copy was taken: the rest is older than guest
         // memory (CPU writes) or than the GPU's copy (GPU writes, still to be downloaded).
         ranges.ForEachInRange(device_addr, copy.size, [&](DAddr start, DAddr end) {
+            guest_write_generations.NoteWrite(start, end - start);
             device_memory.WriteBlockUnsafe(start, &read_mapped_memory[start - device_addr],
                                            end - start);
             gpu_modified_ranges.Subtract(start, end - start);
@@ -1349,7 +1358,9 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             mapped_size += Core::DEVICE_PAGESIZE - ((device_addr + mapped_size) & Core::DEVICE_PAGEMASK);
         }
         if (mapped_size != 0) {
-            memory_tracker.MarkRegionAsCpuModified(device_addr, (std::min<u64>)(mapped_size, size));
+            const u64 marked_size = (std::min<u64>)(mapped_size, size);
+            memory_tracker.MarkRegionAsCpuModified(device_addr, marked_size);
+            guest_write_generations.NoteWrite(device_addr, marked_size);
         }
     }
     const bool use_fast_buffer = needs_alignment_stream
@@ -1380,10 +1391,20 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         if constexpr (!IS_OPENGL && VideoCommon::StreamUniformReusable<Runtime>) {
             // The same bytes as this slot's previous bind, in the same command buffer: bind that
             // stream allocation again instead of allocating and copying (uniform_stream_reuse.h).
-            // EDEN_NX2_UBOREUSE=0 turns it off.
+            // EDEN_NX2_UBOREUSE=0 turns it off. The generation key may skip the copy and the
+            // compare outright, but only where every writer that can reach these bytes bumps
+            // guest_write_generations: native program banks are written past the tracker once in
+            // a while (see the mark above), and a GPU-written range can hold a deferred write.
             if (VideoCommon::UniformStreamReuseEnabled()) {
+                const bool native_bank =
+                    gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
+                    (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000;
+                const bool gen_skip_ok = !native_bank &&
+                                         !memory_tracker.IsRegionGpuModified(device_addr, size) &&
+                                         !IsRegionGpuModified(device_addr, size);
                 streamed = VideoCommon::BindSmallUniformReusing(
-                    runtime, device_memory, stage, index, binding_index, device_addr, size);
+                    runtime, device_memory, guest_write_generations, gen_skip_ok, stage, index,
+                    binding_index, device_addr, size);
             }
         }
         if (!streamed) {
@@ -2412,6 +2433,15 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
     if (UploadSkipEnabled() && !memory_tracker.HasPendingCpuUpload(device_addr, size)) {
         return true;
     }
+    // Nothing wrote the range since this walk's snapshot, so the walk cannot find a dirty word:
+    // skip it. Unlike EDEN_NX2_UPLOAD_SKIP's clean words, the generations cannot lose an update.
+    if (!Nx2Perf::Verify() &&
+        sync_gen_snapshots.Unchanged(guest_write_generations, device_addr, size)) {
+        return true;
+    }
+    if (!Nx2Perf::Verify()) {
+        sync_gen_snapshots.Store(guest_write_generations, device_addr, size);
+    }
     // An upload over a clean word of the tracker (word_manager.h) finds and changes nothing:
     // walk only the dirty ones. Verify walks every word and checks the clean words.
     const bool skip_clean = !Nx2Perf::Verify();
@@ -2645,6 +2675,7 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
     const u8* const mapped_memory = download_staging.mapped_span.data();
     for (const Download& download : downloads) {
         const DAddr device_addr = slot_buffers[download.buffer_id].CpuAddr() + download.copy.src_offset;
+        guest_write_generations.NoteWrite(device_addr, download.copy.size);
         device_memory.WriteBlockUnsafe(
             device_addr, mapped_memory + (download.copy.dst_offset - download_staging.offset),
             download.copy.size);
@@ -2681,6 +2712,8 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
     if (total_size_bytes == 0) {
         return;
     }
+    // Conservative: the copies below write parts of the queried range.
+    guest_write_generations.NoteWrite(device_addr, size);
 
     if constexpr (requires { buffer.Mapped(); }) {
         if (const auto mapped = buffer.Mapped(); !mapped.empty()) {
@@ -2766,6 +2799,7 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
     if (!do_not_mark) {
         Buffer& buffer = slot_buffers[buffer_id];
         memory_tracker.MarkRegionAsCpuModified(buffer.CpuAddr(), buffer.SizeBytes());
+        guest_write_generations.NoteWrite(buffer.CpuAddr(), buffer.SizeBytes());
     }
 
     Unregister(buffer_id);

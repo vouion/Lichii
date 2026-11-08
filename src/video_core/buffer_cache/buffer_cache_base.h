@@ -127,6 +127,126 @@ struct HostBindings {
     u32 max_index{0};
 };
 
+/// Per-page write generations over guest memory. Every buffer cache entry point that changes
+/// guest RAM (or marks it CPU written) bumps the pages of its range, so a snapshot taken right
+/// after reading bytes proves "unchanged" while the pages still hold its generations. Used to
+/// skip re-reading guest bytes (uniform_stream_reuse.h) and re-walking uploads
+/// (SynchronizeBuffer) that can only rediscover the same state. The table is direct-mapped: an
+/// evicted page gets a fresh generation on the next lookup, which can only force extra work,
+/// never skip needed work. Guarded by BufferCache::mutex like the memory tracker.
+class GuestWriteGenerations {
+public:
+    static constexpr u8 MAX_SNAPSHOT_PAGES = 4;
+
+    /// Records a guest write (or an equivalent forced mark) over [device_addr, device_addr + size).
+    void NoteWrite(u64 device_addr, u64 size) noexcept {
+        if (size == 0) {
+            return;
+        }
+        const u64 first = device_addr >> PAGE_BITS;
+        const u64 last = (device_addr + size - 1) >> PAGE_BITS;
+        for (u64 page = first;; ++page) {
+            EntryFor(page).gen = ++epoch;
+            if (page == last) {
+                break;
+            }
+        }
+    }
+
+    /// The generations of the pages under a range just read. 0 when the range spans too many
+    /// pages to key.
+    [[nodiscard]] u8 Snapshot(u64 device_addr, u32 size,
+                              std::array<u64, MAX_SNAPSHOT_PAGES>& out) noexcept {
+        const u64 first = device_addr >> PAGE_BITS;
+        const u64 last = (device_addr + size - 1) >> PAGE_BITS;
+        const u64 count = last - first + 1;
+        if (count > MAX_SNAPSHOT_PAGES) {
+            return 0;
+        }
+        for (u64 index = 0; index < count; ++index) {
+            out[index] = EntryFor(first + index).gen;
+        }
+        return static_cast<u8>(count);
+    }
+
+    /// Whether the pages under the range still hold a snapshot's generations, i.e. nothing
+    /// wrote the range since the snapshot was taken.
+    [[nodiscard]] bool Unchanged(u64 device_addr, u32 size,
+                                 const std::array<u64, MAX_SNAPSHOT_PAGES>& snap,
+                                 u8 count) noexcept {
+        if (count == 0) {
+            return false;
+        }
+        const u64 first = device_addr >> PAGE_BITS;
+        const u64 last = (device_addr + size - 1) >> PAGE_BITS;
+        if (last - first + 1 != count) {
+            return false;
+        }
+        for (u64 index = 0; index < count; ++index) {
+            if (EntryFor(first + index).gen != snap[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+private:
+    static constexpr u64 PAGE_BITS = 12; // Core::DEVICE_PAGESIZE
+    static constexpr size_t NUM_ENTRIES = 4096; // power of two
+
+    struct Entry {
+        u64 page{~u64{0}};
+        u64 gen{};
+    };
+
+    Entry& EntryFor(u64 page) noexcept {
+        Entry& entry = entries[static_cast<size_t>((page * 0x9E3779B97F4A7C15ULL) >> (64 - 12))];
+        if (entry.page != page) {
+            entry.page = page;
+            entry.gen = ++epoch;
+        }
+        return entry;
+    }
+
+    std::array<Entry, NUM_ENTRIES> entries{};
+    u64 epoch{};
+};
+
+/// Range-keyed snapshots of GuestWriteGenerations for SynchronizeBuffer: when the pages under a
+/// range hold the generations recorded after its last walk, that walk would find no new CPU
+/// writes and is skipped. Direct-mapped; a collision only costs a walk.
+class SyncGenSnapshots {
+    static constexpr size_t NUM_ENTRIES = 64;
+    static constexpr u8 MAX_PAGES = GuestWriteGenerations::MAX_SNAPSHOT_PAGES;
+
+    struct Entry {
+        u64 addr{};
+        u32 size{};
+        u8 pages{};
+        std::array<u64, MAX_PAGES> gens{};
+    };
+
+    Entry& SlotFor(u64 addr) noexcept {
+        return entries[(addr >> 6) & (NUM_ENTRIES - 1)];
+    }
+
+    std::array<Entry, NUM_ENTRIES> entries{};
+
+public:
+    [[nodiscard]] bool Unchanged(GuestWriteGenerations& gens, u64 addr, u32 size) noexcept {
+        Entry& entry = SlotFor(addr);
+        return entry.addr == addr && entry.size == size &&
+               gens.Unchanged(addr, size, entry.gens, entry.pages);
+    }
+
+    void Store(GuestWriteGenerations& gens, u64 addr, u32 size) noexcept {
+        Entry& entry = SlotFor(addr);
+        entry.addr = addr;
+        entry.size = size;
+        entry.pages = gens.Snapshot(addr, size, entry.gens);
+    }
+};
+
 class BufferCacheChannelInfo : public ChannelInfo {
 public:
     BufferCacheChannelInfo() = delete;
@@ -648,6 +768,9 @@ private:
     boost::container::small_vector<BufferCopy, 4> upload_copies;
 
     MemoryTracker memory_tracker;
+    /// Guest write generations, for skipping re-reads and re-walks of bytes proven unchanged.
+    GuestWriteGenerations guest_write_generations;
+    SyncGenSnapshots sync_gen_snapshots;
     Common::RangeSet<DAddr> uncommitted_gpu_modified_ranges;
 
     /// Whether GPU-written buffer ranges are copied back to guest memory at the next fence;
