@@ -1238,10 +1238,6 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         }
         FrontApply(fs, address, value);
         split.MacroWrite(this, address, value);
-        // Macro emissions bypass DmaPusher's writer notes, and among them the inline upload
-        // registers write guest memory on the back: note them for the guest-write watermark
-        // (the note is after the entry, so a read past it waits for the write).
-        split.NoteMemoryWriter();
         return true;
     };
 #ifdef ARCHITECTURE_x86_64

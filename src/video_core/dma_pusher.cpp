@@ -529,13 +529,6 @@ void DmaPusher::CallMethod(u32 argument) {
                     }
                 }
             }
-            if (engine_type == Engines::EngineTypes::Maxwell3D) {
-                // Straight to the ring, without FrontWrite's notes: its uploads, reports and
-                // draw-manager draws write guest memory on the back. Note them for the
-                // guest-write watermark (front macros note them themselves; a note here is
-                // only extra conservatism).
-                split.NoteMemoryWriter();
-            }
             split.Method(subchannel, dma_state.method, argument, dma_state.is_last_call,
                          WantsSegment() ? &segment : nullptr);
             return;
@@ -610,10 +603,6 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
                         return;
                     }
                 }
-            }
-            if (engine_type == Engines::EngineTypes::Maxwell3D) {
-                // As in CallMethod: no FrontWrite on this path, so note the batch here.
-                split.NoteMemoryWriter();
             }
             split.MultiMethod(subchannel, dma_state.method, base_start, num_methods,
                               dma_state.method_count, WantsSegment() ? &segment : nullptr);

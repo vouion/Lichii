@@ -157,8 +157,6 @@ enum class Counter : u32 {
     SameValueWrites, ///< Of MethodWrites: the register already held the value
     AcquireChecks,  ///< Semaphore acquires evaluated
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
-    DmaReadNoWait,  ///< MME DMA reads served without waiting for the back
-    DmaReadWaits,   ///< MME DMA reads that landed the range through the back
 };
 
 /// Method calls on this thread by method (3D registers on the back, macros on the front), and
@@ -278,9 +276,6 @@ inline void Report(const char* thread_name = "GPU thread") {
     line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
-    line += fmt::format(" | macro DMA reads {:.0f} without a wait, {:.0f} landed",
-                        static_cast<double>(data.counters[8]) * 1e9 / window,
-                        static_cast<double>(data.counters[9]) * 1e9 / window);
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
         if (data.drain_count[i] != 0) {
