@@ -291,15 +291,6 @@ public:
     std::array<u32, NUM_GRAPHICS_UNIFORM_BUFFERS> uniform_cache_hits{};
     std::array<u32, NUM_GRAPHICS_UNIFORM_BUFFERS> uniform_cache_shots{};
 
-    /// The (address, frame) of each slot's last once-per-frame native program bank upload, so a
-    /// repeat bind skips the set lookup and tracker walk of that condition (buffer_cache.h).
-    struct NativeBankMemo {
-        DAddr addr{};
-        u64 frame{~u64{0}};
-    };
-    std::array<std::array<NativeBankMemo, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES>
-        native_bank_memo{};
-
     u32 uniform_buffer_skip_cache_size = DEFAULT_SKIP_CACHE_SIZE;
 
     bool has_deleted_buffers = false;

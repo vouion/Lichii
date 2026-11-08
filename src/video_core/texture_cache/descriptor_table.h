@@ -71,28 +71,15 @@ public:
             }
         };
         read_fast(std::addressof(result.first));
-        const u64 bit = 1ULL << (index % 64);
-        if ((read_descriptors[index / 64] & bit) != 0 && !(result.first != descriptors[index])) {
-            // The first observation already equals the entry this table has bound, so there is
-            // nothing to re-resolve: repeat binds skip the second read and its torn-guard
-            // compare. The second observation only exists to catch a rewrite (or a download
-            // landing) between the two reads; skipping it means such an in-flight write is
-            // picked up by the next Read of this index instead of this one - the entry was
-            // still the bound value when the first read observed it, and any later read that
-            // sees different bytes takes the full path below. A stale entry can therefore
-            // never outlive one draw, unlike a serial-keyed skip with no change serial.
-            result.second = false;
-            return result;
-        }
         T again;
         read_fast(std::addressof(again));
         if (std::memcmp(&result.first, &again, sizeof(T)) != 0) {
             gpu_memory.ReadBlock(gpu_addr, std::addressof(result.first), sizeof(T));
         }
-        if ((read_descriptors[index / 64] & bit) != 0) {
+        if ((read_descriptors[index / 64] & (1ULL << (index % 64))) != 0) {
             result.second = result.first != descriptors[index];
         } else {
-            read_descriptors[index / 64] |= bit;
+            read_descriptors[index / 64] |= 1ULL << (index % 64);
             result.second = true;
         }
         if (result.second) {

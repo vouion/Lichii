@@ -2,12 +2,9 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
-#include <limits>
 #include <span>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
@@ -209,83 +206,4 @@ TEST_CASE("Uniform stream generation audit catches unnoticed writers", "[video_c
           "valid small uniform rejected");
     Check(runtime.allocations.size() == before + 1, "broken skip still reused stale data");
     CheckBound(runtime, memory, 0, 128);
-}
-
-namespace {
-// The production device memory manager exposes host pointers, so the bind compares the guest
-// bytes in place; a manager that only offers ReadBlockUnsafe takes the copy-then-compare
-// fallback the binds used before. Both must charge the same bind, which is what this measures.
-// Neither carries the tests' bounds Check: Catch2's assertion bookkeeping would dwarf the copy.
-struct CopyMemory {
-    std::array<u8, 8192> bytes{};
-    void ReadBlockUnsafe(u64 address, void* destination, u32 size) const {
-        std::memcpy(destination, bytes.data() + address, size);
-    }
-};
-struct SpanMemory {
-    std::array<u8, 8192> bytes{};
-    void ReadBlockUnsafe(u64 address, void* destination, u32 size) const {
-        std::memcpy(destination, bytes.data() + address, size);
-    }
-    template <typename T>
-    const T* GetPointer(u64 address) const {
-        return reinterpret_cast<const T*>(bytes.data() + address);
-    }
-};
-// Runtime without the tests' Catch2 bounds checks: their bookkeeping would dwarf the bind.
-struct BenchRuntime {
-    struct StreamUniformRef {
-        size_t allocation;
-    };
-    std::vector<std::vector<u8>> allocations;
-    StreamUniformRef last{}, bound{};
-    u64 tick{1};
-    u64 CurrentTick() const {
-        return tick;
-    }
-    StreamUniformRef LastStreamUniformRef() const {
-        return last;
-    }
-    std::span<u8> BindMappedUniformBuffer(size_t, u32, u32 size) {
-        allocations.emplace_back(size);
-        last = bound = StreamUniformRef{allocations.size() - 1};
-        return allocations.back();
-    }
-    void RebindStreamUniform(StreamUniformRef ref, u32) {
-        bound = ref;
-    }
-};
-} // namespace
-
-TEST_CASE("Uniform stream bind CPU benchmark", "[.][uniform_stream_bench]") {
-    using VideoCommon::BindSmallUniformReusing;
-    constexpr size_t binds = 2'000'000;
-    constexpr size_t trials = 5;
-    const auto measure = [&](auto& memory, u32 size) {
-        BenchRuntime runtime;
-        VideoCommon::GuestWriteGenerations gen;
-        VideoCommon::ResetUniformStreamReuse<BenchRuntime>();
-        REQUIRE(BindSmallUniformReusing(runtime, memory, gen, false, 0, 0, 0, 0, size));
-        double best = std::numeric_limits<double>::max();
-        for (size_t trial = 0; trial < trials; ++trial) {
-            const auto start = std::chrono::steady_clock::now();
-            for (size_t index = 0; index < binds; ++index) {
-                BindSmallUniformReusing(runtime, memory, gen, false, 0, 0, 0, 0, size);
-            }
-            const auto elapsed = std::chrono::steady_clock::now() - start;
-            best = (std::min)(best, std::chrono::duration<double, std::nano>(elapsed).count() /
-                                        binds);
-        }
-        REQUIRE(runtime.allocations.size() == 1);
-        return best;
-    };
-    CopyMemory copy_memory;   // the old copy-then-compare path
-    SpanMemory span_memory;   // compare in place, as the device memory manager allows
-    for (const u32 size : {64u, 256u, 1024u}) {
-        const double copy_ns = measure(copy_memory, size);
-        const double span_ns = measure(span_memory, size);
-        std::cout << "Uniform stream bind size=" << size << ": copy_ns=" << copy_ns
-                  << " inplace_ns=" << span_ns << " saved_ns=" << copy_ns - span_ns
-                  << " (fastest of 5, CPU only, not gameplay FPS)\n";
-    }
 }

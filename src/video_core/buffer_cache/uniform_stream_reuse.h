@@ -13,7 +13,6 @@
 
 #include "common/common_types.h"
 #include "common/logging.h"
-#include "core/device_memory_manager.h"
 
 namespace VideoCommon {
 
@@ -186,35 +185,18 @@ template <class Runtime, class DeviceMemory, class GuestGen>
             }
         }
     }
-    // The guest bytes themselves: read them once and compare them in place, so the equal case
-    // (the common one) pays no intermediate copy and a difference copies straight from the
-    // same pointer the compare read. A range that crosses a page boundary, or a memory manager
-    // without host pointers (the tests'), falls back to the copy-then-compare it did before.
-    // Nothing is skipped here: the same bytes are observed either way.
-    const u8* guest = have_scratch ? scratch : nullptr;
-    if (!same_bytes && guest == nullptr) {
-        if constexpr (requires { device_memory.template GetPointer<u8>(u64{}); }) {
-            if (size <= Core::DEVICE_PAGESIZE - (device_addr & Core::DEVICE_PAGEMASK)) {
-                guest = device_memory.template GetPointer<u8>(device_addr);
-            }
-        }
-        if (guest == nullptr) {
-            device_memory.ReadBlockUnsafe(device_addr, scratch, size);
-            guest = scratch;
-        }
+    if (!same_bytes && !have_scratch) {
+        device_memory.ReadBlockUnsafe(device_addr, scratch, size);
     }
     if (!same_bytes) {
-        same_bytes = slot.size == size && std::memcmp(guest, slot.bytes.data(), size) == 0;
+        same_bytes = slot.size == size && std::memcmp(slot.bytes.data(), scratch, size) == 0;
         ++stats.copies;
-        // The rate-limited log moved off the hot path: it used to run on every compare.
-        if (stats.copies == 1 || (stats.copies & 0x3FFFF) == 0) {
-            LogUniformStreamSkip("copy");
-        }
+        LogUniformStreamSkip("copy");
     } else {
         ++stats.skips;
     }
     if (gen_skip_ok) {
-        // The guest bytes are observed above; the proven-unchanged slot bytes are the guest's.
+        // The bytes at `scratch` (or the proven-unchanged slot bytes) are the guest's now.
         slot.addr = device_addr;
         slot.gen_pages = guest_gen.Snapshot(device_addr, size, slot.gens);
     } else {
@@ -225,20 +207,14 @@ template <class Runtime, class DeviceMemory, class GuestGen>
         return true;
     }
     const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
-    if (same_bytes) {
-        std::memcpy(span.data(), slot.bytes.data(), size);
-    } else {
-        // One observation of the guest's bytes feeds both the stream allocation and the slot's
-        // copy of them: caching the stream's own contents keeps the two identical even if the
-        // guest writes again between the two copies (which is what made the old scratch
-        // snapshot necessary).
-        std::memcpy(span.data(), guest, size);
-        slot.size = size;
-        std::memcpy(slot.bytes.data(), span.data(), size);
-    }
+    std::memcpy(span.data(), same_bytes ? slot.bytes.data() : scratch, size);
     slot.ref = runtime.LastStreamUniformRef();
     // After the allocation: the tick the stream region is tagged with is the one current now.
     slot.tick = runtime.CurrentTick();
+    if (!same_bytes) {
+        slot.size = size;
+        std::memcpy(slot.bytes.data(), scratch, size);
+    }
     return true;
 }
 

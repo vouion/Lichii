@@ -298,45 +298,10 @@ T MemoryManager::Read(GPUVAddr addr) const {
         }
     }
 
-    // The translation below (GpuToCpuAddress plus the device manager's own page table) runs for
-    // every constant-buffer and handle word a draw reads, while the mapping behind a page only
-    // changes when a page table operation bumps MapSerial (a different manager has a different
-    // ID). Keep the host pointer of recently read pages per thread while both still hold, the
-    // same way descriptor_table.h caches its pool pages: only the translation is memoized, the
-    // content is still read from guest memory on every call. Pages that do not translate are
-    // remembered as such too, so an unmapped read reports itself with one walk instead of two.
-    const u8* host = nullptr;
-    bool translated = false;
-    if constexpr (sizeof(T) <= Core::DEVICE_PAGESIZE) {
-        // The memo's page has to be a whole host page and the same page-table entry the read
-        // would translate through; a manager with finer pages could straddle two entries.
-        if (page_bits >= Core::DEVICE_PAGEBITS && big_page_bits >= Core::DEVICE_PAGEBITS &&
-            (addr & Core::DEVICE_PAGEMASK) + sizeof(T) <= Core::DEVICE_PAGESIZE) {
-            struct PageMemo {
-                GPUVAddr page{};
-                u64 serial{};
-                std::size_t id{};
-                const u8* host{};
-            };
-            static thread_local std::array<PageMemo, 8> memos{};
-            const GPUVAddr page = addr & ~GPUVAddr{Core::DEVICE_PAGEMASK};
-            const u64 serial = MapSerial();
-            PageMemo& memo = memos[(page >> Core::DEVICE_PAGEBITS) & 7];
-            if (memo.page != page || memo.serial != serial || memo.id != unique_identifier) {
-                memo = PageMemo{page, serial, unique_identifier, GetPointer(page)};
-            }
-            translated = true;
-            host = memo.host ? memo.host + (addr & Core::DEVICE_PAGEMASK) : nullptr;
-        }
-    }
-    if (!translated) {
-        host = GetPointer(addr);
-    }
-
-    if (host) {
+    if (auto page_pointer{GetPointer(addr)}; page_pointer) {
         // NOTE: Avoid adding any extra logic to this fast-path block
         T value;
-        std::memcpy(&value, host, sizeof(T));
+        std::memcpy(&value, page_pointer, sizeof(T));
         return value;
     }
 
