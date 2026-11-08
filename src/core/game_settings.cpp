@@ -168,6 +168,13 @@ void LoadEarlyOverrides(std::uint64_t program_id) {
                 Settings::values.cpu_clock.SetGlobal(false);
                 Settings::values.cpu_clock.SetValue(Settings::CpuClock::Normal);
             }
+            // Conservative caps the device figure at 6 GiB + 1 GiB x resolution scale, which on a
+            // 24 GB card evicts and re-transcodes decoded ASTC/BC3 all session. Aggressive lifts
+            // the texture cache to the driver budget (build 116's Ocarina setting).
+            if (Settings::values.vram_usage_mode.UsingGlobal()) {
+                Settings::values.vram_usage_mode.SetGlobal(false);
+                Settings::values.vram_usage_mode.SetValue(Settings::VramUsageMode::Aggressive);
+            }
             break;
         default:
             break;
