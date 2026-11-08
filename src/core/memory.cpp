@@ -922,6 +922,15 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
+        // Confirming counter for the guest-CPU write-trap suspect: RasterizerCachedMemory stores
+        // leave fastmem and run this full path (~250-600 ns each). The per-frame count says whether
+        // the write-side trap twin is worth building (see drafts/guest-cpu-profile.md). Count-only
+        // (no per-call clock) so it does not slow the hot path.
+        static std::atomic<u64> write_trap_count{};
+        if ((write_trap_count.fetch_add(1, std::memory_order_relaxed) & 0x3ffff) == 0) {
+            LOG_INFO(HW_Memory, "guest write-trap: {} calls (cumulative)",
+                     write_trap_count.load(std::memory_order_relaxed));
+        }
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
