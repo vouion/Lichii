@@ -269,10 +269,6 @@ struct GPU::Impl {
         return renderer->ReadRasterizer()->OnCPUWrite(addr, size);
     }
 
-    bool OnCPUWriteCaches(DAddr addr, u64 size, bool force) {
-        return renderer->ReadRasterizer()->OnCPUWriteCaches(addr, size, force);
-    }
-
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
     void FlushAndInvalidateRegion(DAddr addr, u64 size) {
         gpu_thread.FlushAndInvalidateRegion(addr, size, is_async);
@@ -606,10 +602,6 @@ void GPU::InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {
 
 bool GPU::OnCPUWrite(DAddr addr, u64 size) {
     return impl->OnCPUWrite(addr, size);
-}
-
-bool GPU::OnCPUWriteCaches(DAddr addr, u64 size, bool force) {
-    return impl->OnCPUWriteCaches(addr, size, force);
 }
 
 void GPU::FlushAndInvalidateRegion(DAddr addr, u64 size) {

@@ -280,11 +280,6 @@ public:
     /// sensible, false otherwise, addr and size must be a valid combination
     bool OnCPUWrite(DAddr addr, u64 size);
 
-    /// The texture and shader half of OnCPUWrite (see RasterizerInterface::OnCPUWriteCaches).
-    /// Returns true when nothing covers the range and the caller must call again after the
-    /// write lands.
-    bool OnCPUWriteCaches(DAddr addr, u64 size, bool force);
-
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
     void FlushAndInvalidateRegion(DAddr addr, u64 size);
 

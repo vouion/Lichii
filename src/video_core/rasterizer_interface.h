@@ -160,17 +160,6 @@ public:
 
     virtual bool OnCPUWrite(PAddr addr, u64 size) = 0;
 
-    /// The texture and shader half of OnCPUWrite, split out so a store whose range no texture
-    /// or shader covers can skip the two global locks (video_core/nx2_write_filter.h).
-    /// Contract: when OnCPUWrite returns false, the caller runs this before the write lands and,
-    /// if it returns true ("nothing covers the range"), again after the write lands. A `force`
-    /// call ignores the filter and must do the full notification (used where the write path
-    /// cannot defer). Implementations that keep doing everything in OnCPUWrite (OpenGL, Null,
-    /// test doubles) need not override this: the default does nothing and never defers.
-    virtual bool OnCPUWriteCaches(PAddr addr, u64 size, bool force) {
-        return false;
-    }
-
     /// Sync memory between guest and host.
     virtual void InvalidateGPUCache() = 0;
 
