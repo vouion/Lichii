@@ -30,7 +30,8 @@ limiting is disabled.
 | `cpu_present_wall_ms` | Wall time from handler entry through completion of guest pacing. Excludes trace logging, the existing statistics log, and reply construction. |
 | `fence_wall_ms` | Wall time in the existing current or previous guest-fence wait policy. This is a host wait, not a hardware GPU duration. |
 | `composite_wall_ms` | Wall time in the service's `Composite` call. This is not the Vulkan renderer's device execution time. |
-| `target_ms` | Requested guest pacing period after interval, refresh, and speed percentage. Zero when guest pacing is bypassed. |
+| `target_fps` | Active present-rate cap: parsed `EDEN_NX2_TARGET_FPS` when set, otherwise the per-game default (30 for Ocarina of Time, 0 for every other title). Zero means the game's requested pace. Zero when guest pacing is bypassed. |
+| `target_ms` | Guest pacing period after interval, refresh, speed percentage, and the target-fps cap. Zero when guest pacing is bypassed. |
 | `sleep_requested_ms` | Duration supplied to the guest-kernel sleep, before its existing 2 ns deadline adjustment. Zero when no sleep occurs. |
 | `sleep_actual_wall_ms` | Host steady-clock elapsed time around that guest-kernel sleep call, including descheduling and wake-up latency. Zero when no sleep occurs. |
 | `pace_wall_ms` | Wall time for the whole `PaceToVblank` call, including calculation and existing logs. |
@@ -189,6 +190,11 @@ frame, unavailable results, or an unsupported device can leave no completed samp
 
 - `EDEN_NX2_SWAP_INTERVAL=<n>` forces a nonzero guest interval. It is not a trace switch
   and can change emulation speed. Zero leaves the guest interval selection in effect.
+- `EDEN_NX2_TARGET_FPS=<n>` caps the presented rate at n fps at 100% speed: a present is
+  never held for less than 1/n second, while a game requesting a slower cadence keeps it.
+  Unset, Ocarina of Time defaults to a 30 fps cap and every other title keeps its requested
+  pace. `0` restores the requested pace for every title. An active cap logs once per
+  session. It is not a trace switch.
 - `EDEN_NX2_FRAMES_AHEAD` defaults to enabled. A value starting with `0` restores waiting
   for the current frame. The default waits for the previous frame and also waits for
   the current one when the previous fence is behind. Trace logging does not change it.

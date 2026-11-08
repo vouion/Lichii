@@ -1834,8 +1834,9 @@ private:
                          "requested_hz={} effective_interval={} effective_hz={} forced_interval={} "
                          "speed_limit={} speed_percent={} switches={} last_switch={:#x}->{:#x} "
                          "cpu_frame_wall_ms={:.3f} cpu_present_wall_ms={:.3f} fence_wall_ms={:.3f} "
-                         "composite_wall_ms={:.3f} target_ms={:.3f} sleep_requested_ms={:.3f} "
-                         "sleep_actual_wall_ms={:.3f} pace_wall_ms={:.3f} deadline_reset={}",
+                         "composite_wall_ms={:.3f} target_fps={} target_ms={:.3f} "
+                         "sleep_requested_ms={:.3f} sleep_actual_wall_ms={:.3f} "
+                         "pace_wall_ms={:.3f} deadline_reset={}",
                          m_presents, w[12], w[12] >> 16, w[12] & 0xffff,
                          m_frame_trace.interval, m_frame_trace.refresh, m_frame_trace.forced,
                          Settings::values.use_speed_limit.GetValue(), Settings::SpeedLimit(),
@@ -1844,8 +1845,9 @@ private:
                          m_frame_trace.last_present == std::chrono::steady_clock::time_point{}
                              ? -1.0 : ms(entered - m_frame_trace.last_present),
                          ms(paced - entered), ms(waited - entered), ms(composited - waited),
-                         m_frame_trace.target_ms, m_frame_trace.sleep_requested_ms,
-                         m_frame_trace.sleep_actual_ms, ms(paced - composited),
+                         m_frame_trace.target_fps, m_frame_trace.target_ms,
+                         m_frame_trace.sleep_requested_ms, m_frame_trace.sleep_actual_ms,
+                         ms(paced - composited),
                          m_frame_trace.deadline_reset);
                 m_frame_trace.switches = 0;
             }
@@ -1918,6 +1920,7 @@ private:
     // next vblank instead (title 4 ran at up to 160 fps, its timing and audio with it).
     Nx2PresentPacer m_present_pacer;
     u32 m_swap_word{};
+    bool m_target_cap_logged{};
     Nx2OotTime::FrameDelta m_oot_frame_delta;
 
     struct FrameTrace {
@@ -1926,6 +1929,7 @@ private:
         std::optional<u32> previous_word;
         u64 switches{};
         u32 switch_from{}, switch_to{}, interval{}, refresh{}, forced{};
+        int target_fps{};
         double target_ms{}, sleep_requested_ms{}, sleep_actual_ms{};
         bool deadline_reset{};
     } m_frame_trace;
@@ -1942,6 +1946,7 @@ private:
                 m_frame_trace.switch_to = timing;
             }
             m_frame_trace.previous_word = timing;
+            m_frame_trace.target_fps = 0;
             m_frame_trace.target_ms = 0;
             m_frame_trace.sleep_requested_ms = 0;
             m_frame_trace.sleep_actual_ms = 0;
@@ -1951,6 +1956,22 @@ private:
             const char* value = std::getenv("EDEN_NX2_SWAP_INTERVAL");
             return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
         }();
+        // EDEN_NX2_TARGET_FPS=<n> caps the presented rate at n fps; 0 keeps the game's requested
+        // pace. Unset, Ocarina of Time locks to 30 fps: its light scenes raced to 60 while its
+        // heavy ones sank into the twenties, and one steady 30 is the smoother trade.
+        static const int forced_target_fps = [] {
+            const char* const value = std::getenv("EDEN_NX2_TARGET_FPS");
+            if (value == nullptr) {
+                return -1;
+            }
+            LOG_INFO(Service, "EDEN_NX2_TARGET_FPS={} active", value);
+            return (std::max)(0, static_cast<int>(std::strtoll(value, nullptr, 10)));
+        }();
+        int target_fps = forced_target_fps;
+        if (target_fps < 0) {
+            target_fps =
+                process != nullptr && process->GetProgramId() == Nx2OotTime::ProgramId ? 30 : 0;
+        }
         const bool mkw_dynamic =
             process != nullptr && process->GetProgramId() == Settings::MarioKartWorldProgramId &&
             process->IsMkwDynamicFpsPatchApplied() && Settings::values.mkw_dynamic_fps.GetValue();
@@ -1974,9 +1995,23 @@ private:
             LOG_INFO(Service, "nx2:vi2 present #{} swap interval {} at {} Hz (word 12 = {:#x})",
                      m_presents, swap_interval, refresh_rate, timing);
         }
-        const auto interval = std::chrono::nanoseconds{
+        if (target_fps > 0 && !std::exchange(m_target_cap_logged, true)) {
+            LOG_INFO(Service, "nx2:vi2 present #{} pacing capped at {} fps (word 12 = {:#x})",
+                     m_presents, target_fps, timing);
+        }
+        const auto requested_interval = std::chrono::nanoseconds{
             100'000'000'000LL * swap_interval / refresh_rate / Settings::SpeedLimit()};
+        // The cap never holds a present for less than one target frame, while a game asking for a
+        // slower cadence keeps it. Nx2PresentPacer then anchors the holds to a 1/target_fps grid:
+        // a late frame shortens the next hold instead of bursting, so a scene that cannot render
+        // at 30 holds as close to it as it can and one that can races no further than 30.
+        std::chrono::nanoseconds interval = requested_interval;
+        if (target_fps > 0) {
+            interval = (std::max)(requested_interval, std::chrono::nanoseconds{
+                100'000'000'000LL / target_fps / Settings::SpeedLimit()});
+        }
         if (trace) {
+            m_frame_trace.target_fps = target_fps;
             m_frame_trace.target_ms = std::chrono::duration<double, std::milli>(interval).count();
         }
         const auto now = std::chrono::steady_clock::now();
