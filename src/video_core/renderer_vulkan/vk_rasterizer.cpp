@@ -65,6 +65,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_write_filter.h"
 
 namespace Vulkan {
 
@@ -1669,11 +1670,21 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     DEBUG_ASSERT(addr != 0 || size != 0);
-    {
-        std::scoped_lock lock{buffer_cache.mutex};
-        if (buffer_cache.OnCPUWrite(addr, size)) {
-            return true;
-        }
+    // Only the buffer cache half runs before the write lands: its NoteWrite bumps the guest
+    // write generations that uniform reuse and SynchronizeBuffer trust, so it must not move
+    // after the store. The texture and shader half is OnCPUWriteCaches, which the store path
+    // defers past the write when no texture or shader covers the range.
+    std::scoped_lock lock{buffer_cache.mutex};
+    return buffer_cache.OnCPUWrite(addr, size);
+}
+
+bool RasterizerVulkan::OnCPUWriteCaches(DAddr addr, u64 size, bool force) {
+    DEBUG_ASSERT(addr != 0 || size != 0);
+    // Uncovered (and not forced): nothing in either cache can match, so the locks below would
+    // only buy a no-op lookup. Return true so the store path checks again once the write has
+    // landed - a texture or shader registered in between must still be told.
+    if (!force && !VideoCore::Nx2WriteFilter::Get().Covers(addr, size)) {
+        return true;
     }
     {
         std::scoped_lock lock{texture_cache.mutex};

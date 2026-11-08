@@ -31,6 +31,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_write_filter.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/util.h"
@@ -310,6 +311,10 @@ bool ShaderCache::IsRejected(VAddr addr) {
 
 void ShaderCache::RememberRejection(VAddr addr) {
     std::scoped_lock lock{rejected_mutex};
+    // InvalidatePagesInRange's erase_if only matches entries whose program start lies inside
+    // the write range, so covering the start's page covers every write that could erase it.
+    // Mark before the entry lands (nx2_write_filter.h).
+    VideoCore::Nx2WriteFilter::Get().Mark(addr, 1);
     rejected_native.emplace(addr, std::current_exception());
     rejected_lowest.store((std::min)(rejected_lowest.load(std::memory_order_relaxed), addr),
                           std::memory_order_relaxed);
@@ -356,6 +361,10 @@ void ShaderCache::Register(std::unique_ptr<ShaderInfo> data, VAddr addr, size_t 
     const VAddr addr_end = addr + size;
     Entry* const entry = NewEntry(addr, addr_end, data.get());
 
+    // Mark before the invalidation cache gains the entries: a store that skips the
+    // notification must be able to prove no shader ever covered its range
+    // (nx2_write_filter.h).
+    VideoCore::Nx2WriteFilter::Get().Mark(addr, size);
     const u64 page_end = (addr_end + YUZU_PAGESIZE - 1) >> YUZU_PAGEBITS;
     for (u64 page = addr >> YUZU_PAGEBITS; page < page_end; ++page) {
         invalidation_cache[page].push_back(entry);

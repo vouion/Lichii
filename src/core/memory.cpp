@@ -175,7 +175,7 @@ struct Memory::Impl {
         if (!current_page_table || (addr & 3) != 0) {
             return false;
         }
-        auto* pointer = GetPointerImpl(GetInteger(addr), [] {}, [&] {
+        auto* pointer = GetPointerImpl(GetInteger(addr), [] {}, [&](u8*) {
             HandleRasterizerDownload(GetInteger(addr), sizeof(u32));
         });
         if (!pointer) {
@@ -361,7 +361,7 @@ struct Memory::Impl {
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
             if (!unsafe) {
-                HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount);
+                HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount, ptr, false);
             }
             std::memcpy(ptr, reinterpret_cast<u8 const*>(buffer) + offset, copy_amount);
         });
@@ -376,7 +376,7 @@ struct Memory::Impl {
             std::memset(ptr, 0, copy_amount);
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
-            HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount);
+            HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount, ptr, false);
             std::memset(ptr, 0, copy_amount);
         });
     }
@@ -405,13 +405,13 @@ struct Memory::Impl {
                 had_unmapped = true;
             },
             [](const std::size_t offset, const std::size_t copy_amount, u8* const host_ptr) {},
-            [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const host_ptr) { cb(current_vaddr, offset, copy_amount); }
+            [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const host_ptr) { cb(current_vaddr, offset, copy_amount, host_ptr); }
         );
         return had_unmapped ? Kernel::ResultInvalidCurrentMemory : ResultSuccess;
     }
 
     Result InvalidateDataCache(Common::ProcessAddress dest_addr, std::size_t size) {
-        auto on_rasterizer = [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t block_size) {
+        auto on_rasterizer = [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t block_size, u8* const host_ptr) {
             // dc ivac: Invalidate to point of coherency
             // GPU flush -> CPU invalidate
             HandleRasterizerDownload(GetInteger(current_vaddr), block_size);
@@ -420,19 +420,19 @@ struct Memory::Impl {
     }
 
     Result StoreDataCache(Common::ProcessAddress dest_addr, std::size_t size) {
-        auto on_rasterizer = [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t block_size) {
+        auto on_rasterizer = [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t block_size, u8* const host_ptr) {
             // dc cvac: Store to point of coherency
             // CPU flush -> GPU invalidate
-            HandleRasterizerWrite(GetInteger(current_vaddr), block_size);
+            HandleRasterizerWrite(GetInteger(current_vaddr), block_size, host_ptr, false);
         };
         return PerformCacheOperation(dest_addr, size, on_rasterizer);
     }
 
     Result FlushDataCache(Common::ProcessAddress dest_addr, std::size_t size) {
-        auto on_rasterizer = [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t block_size) {
+        auto on_rasterizer = [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t block_size, u8* const host_ptr) {
             // dc civac: Store to point of coherency, and invalidate from cache
             // CPU flush -> GPU invalidate
-            HandleRasterizerWrite(GetInteger(current_vaddr), block_size);
+            HandleRasterizerWrite(GetInteger(current_vaddr), block_size, host_ptr, false);
         };
         return PerformCacheOperation(dest_addr, size, on_rasterizer);
     }
@@ -742,7 +742,9 @@ struct Memory::Impl {
                     return GetPointerFromDebugMemory(vaddr);
                 case Common::PageType::RasterizerCachedMemory: {
                     u8* const host_ptr{GetPointerFromRasterizerCachedMemory(vaddr)};
-                    on_rasterizer();
+                    // Hand the resolved pointer to the write path: HandleRasterizerWrite
+                    // used to redo these two page-table walks for every trapped store.
+                    on_rasterizer(host_ptr);
                     return host_ptr;
                 }
                 case Common::PageType::Unmapped: [[unlikely]] {
@@ -766,12 +768,12 @@ struct Memory::Impl {
             [vaddr]() {
                 LOG_ERROR(HW_Memory, "Unmapped GetPointer @ {:#016x}", GetInteger(vaddr));
             },
-            []() {});
+            [](u8*) {});
     }
 
     [[nodiscard]] u8* GetPointerSilent(const Common::ProcessAddress vaddr) const {
         return GetPointerImpl(
-            GetInteger(vaddr), []() {}, []() {});
+            GetInteger(vaddr), []() {}, [](u8*) {});
     }
 
     [[nodiscard]] u8* GetContiguousSpan(VAddr addr, std::size_t size) const noexcept {
@@ -807,7 +809,7 @@ struct Memory::Impl {
                 LOG_ERROR(HW_Memory, "Unmapped Read{} @ {:#016x} (#{})", sizeof(T) * 8, addr, count);
             }
             ++UnmappedReadFlag();
-        }, [&]() {
+        }, [&](u8*) {
             if (!ReadTrapsEnabled() || ReadTrapArmed(addr & 0xffffffffffffULL, sizeof(T))) {
                 HandleRasterizerDownload(addr, sizeof(T));
             }
@@ -828,37 +830,61 @@ struct Memory::Impl {
     template <typename T>
     inline void Write(Common::ProcessAddress vaddr, const T data) noexcept requires(std::is_trivially_copyable_v<T>) {
         const u64 addr = GetInteger(vaddr);
+        DAddr caches_pending = 0;
         if (auto const ptr = GetPointerImpl(addr, [addr, data]() {
             LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x}", sizeof(T) * 8, addr, u64(data));
-        }, [&]() { HandleRasterizerWrite(addr, sizeof(T)); }); ptr) [[likely]]
+        }, [&](u8* p) { caches_pending = HandleRasterizerWrite(addr, sizeof(T), p, true); }); ptr) [[likely]] {
             std::memcpy(ptr, &data, sizeof(T));
+            // HandleRasterizerWrite deferred the texture/shader notification because nothing
+            // covered the range: check once more now that the write has landed, in case a
+            // texture or shader registered over it in between (nx2_write_filter.h).
+            if (caches_pending != 0) [[unlikely]] {
+                system.GPU().OnCPUWriteCaches(caches_pending, sizeof(T), false);
+            }
+        }
     }
 
     template <typename T>
     bool WriteExclusive(Common::ProcessAddress vaddr, const T data, const T expected) {
+        DAddr caches_pending = 0;
         u8* const ptr = GetPointerImpl(
             GetInteger(vaddr),
             [vaddr, data]() {
                 LOG_ERROR(HW_Memory, "Unmapped WriteExclusive{} @ {:#016x} = {:#016x}",
                           sizeof(T) * 8, GetInteger(vaddr), static_cast<u64>(data));
             },
-            [&]() { HandleRasterizerWrite(GetInteger(vaddr), sizeof(T)); });
+            [&](u8* p) {
+                caches_pending = HandleRasterizerWrite(GetInteger(vaddr), sizeof(T), p, true);
+            });
         if (ptr) {
-            return Common::AtomicCompareAndSwap(reinterpret_cast<T*>(ptr), data, expected);
+            const bool swapped =
+                Common::AtomicCompareAndSwap(reinterpret_cast<T*>(ptr), data, expected);
+            if (caches_pending != 0) [[unlikely]] {
+                system.GPU().OnCPUWriteCaches(caches_pending, sizeof(T), false);
+            }
+            return swapped;
         }
         return true;
     }
 
     bool WriteExclusive128(Common::ProcessAddress vaddr, const u128 data, const u128 expected) {
+        DAddr caches_pending = 0;
         u8* const ptr = GetPointerImpl(
             GetInteger(vaddr),
             [vaddr, data]() {
                 LOG_ERROR(HW_Memory, "Unmapped WriteExclusive128 @ {:#016x} = {:#016x}{:016X}",
                           GetInteger(vaddr), static_cast<u64>(data[1]), static_cast<u64>(data[0]));
             },
-            [&]() { HandleRasterizerWrite(GetInteger(vaddr), sizeof(u128)); });
+            [&](u8* p) {
+                caches_pending = HandleRasterizerWrite(GetInteger(vaddr), sizeof(u128), p, true);
+            });
         if (ptr) {
-            return Common::AtomicCompareAndSwap(reinterpret_cast<u64*>(ptr), data, expected);
+            const bool swapped =
+                Common::AtomicCompareAndSwap(reinterpret_cast<u64*>(ptr), data, expected);
+            if (caches_pending != 0) [[unlikely]] {
+                system.GPU().OnCPUWriteCaches(caches_pending, sizeof(u128), false);
+            }
+            return swapped;
         }
         return true;
     }
@@ -882,7 +908,7 @@ struct Memory::Impl {
 
     void HandleRasterizerDownload(VAddr v_address, size_t size) {
         const auto* p = GetPointerImpl(
-            v_address, []() {}, []() {});
+            v_address, []() {}, [](u8*) {});
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
         }
@@ -921,18 +947,32 @@ struct Memory::Impl {
         });
     }
 
-    void HandleRasterizerWrite(VAddr v_address, size_t size) {
+    /// Notifies the caches about a guest store to GPU-registered memory, before the store
+    /// lands. `p` is the host pointer the caller already resolved for this same store (the
+    /// path used to re-walk the page table here for every trapped store). With `allow_defer`
+    /// and a range no texture or shader covers, the texture/shader notification is skipped
+    /// and the returned device address tells the caller to repeat it after the store has
+    /// landed (0 when nothing is pending); without it, everything is notified now exactly as
+    /// before. Callers that cannot re-check after the write pass false.
+    DAddr HandleRasterizerWrite(VAddr v_address, size_t size, u8* p, bool allow_defer) {
         // Confirming counter for the guest-CPU write-trap suspect: RasterizerCachedMemory stores
         // leave fastmem and run this full path (~250-600 ns each). The per-frame count says whether
         // the write-side trap twin is worth building (see drafts/guest-cpu-profile.md). Count-only
-        // (no per-call clock) so it does not slow the hot path.
+        // (no per-call clock) so it does not slow the hot path; the covered/skipped split logs how
+        // much of it the write filter (video_core/nx2_write_filter.h) removes.
         static std::atomic<u64> write_trap_count{};
         if ((write_trap_count.fetch_add(1, std::memory_order_relaxed) & 0x3ffff) == 0) {
-            LOG_INFO(HW_Memory, "guest write-trap: {} calls (cumulative)",
-                     write_trap_count.load(std::memory_order_relaxed));
+            u64 covered = 0;
+            u64 skipped = 0;
+            for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; ++i) {
+                covered += filter_covered[i].load(std::memory_order_relaxed);
+                skipped += filter_skipped[i].load(std::memory_order_relaxed);
+            }
+            LOG_INFO(HW_Memory,
+                     "guest write-trap: {} calls (cumulative), {} covered by a texture or "
+                     "shader, {} skipped by the write filter",
+                     write_trap_count.load(std::memory_order_relaxed), covered, skipped);
         }
-        const auto* p = GetPointerImpl(
-            v_address, []() {}, []() {});
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
         const size_t core = (std::min)(system.GetCurrentHostThreadID(),
                                      sys_core); // any other calls threads go to syscore.
@@ -941,7 +981,7 @@ struct Memory::Impl {
         }
         if (!gpu_device_memory->IsPhysicalPointer(p)) [[unlikely]] {
             ReportForeignPointer(v_address, p);
-            return;
+            return 0;
         }
         // Guard on sys_core;
         if (core == sys_core) [[unlikely]] {
@@ -952,6 +992,7 @@ struct Memory::Impl {
                 sys_core_guard.unlock();
             }
         };
+        DAddr caches_pending = 0;
         gpu_device_memory->ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
             auto& current_area = rasterizer_write_areas[core];
             PAddr subaddress = address >> YUZU_PAGEBITS;
@@ -961,16 +1002,34 @@ struct Memory::Impl {
             // we should let the compiler just do it's thing...
             if (current_area.last_address != subaddress) {
                 // Short circuit the need to check for address/size
-                auto const do_collection = (address != 0 && size != 0)
-                    && system.GPU().OnCPUWrite(address, size);
+                const bool nonzero = address != 0 && size != 0;
+                auto const do_collection =
+                    nonzero && system.GPU().OnCPUWrite(address, size);
                 if (do_collection) {
                     current_area.last_address = subaddress;
                 } else {
+                    if (nonzero) {
+                        // The texture and shader half: skipped (and re-checked after the
+                        // write lands) when the filter proves no cache covers the range.
+                        // `!allow_defer` forces the notification, exactly the old path.
+                        if (system.GPU().OnCPUWriteCaches(address, size, !allow_defer)) {
+                            filter_skipped[core].fetch_add(1, std::memory_order_relaxed);
+                            if (caches_pending != 0) {
+                                // A gathered alias mapping cannot defer twice: notify the
+                                // earlier one now, exactly as the unfiltered path did.
+                                system.GPU().OnCPUWriteCaches(caches_pending, size, true);
+                            }
+                            caches_pending = address;
+                        } else {
+                            filter_covered[core].fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
                     return;
                 }
             }
             gpu_dirty_managers[core].Collect(address, size);
         });
+        return caches_pending;
     }
 
     struct GPUDirtyState {
@@ -1009,6 +1068,10 @@ struct Memory::Impl {
     std::atomic<size_t> armed_read_trap_count{};
     std::mutex read_trap_mutex;
     std::array<GPUDirtyState, Core::Hardware::NUM_CPU_CORES> rasterizer_write_areas{};
+    // Diagnostic split of HandleRasterizerWrite's cache notification (logged every 262144
+    // calls): how many stores the write filter proved uncovered (skipped) vs covered.
+    std::array<std::atomic<u64>, Core::Hardware::NUM_CPU_CORES> filter_skipped{};
+    std::array<std::atomic<u64>, Core::Hardware::NUM_CPU_CORES> filter_covered{};
     std::array<Common::ScratchBuffer<u32>, Core::Hardware::NUM_CPU_CORES> scratch_buffers{};
     std::span<Core::GPUDirtyMemoryManager> gpu_dirty_managers;
     std::mutex sys_core_guard;
@@ -1223,7 +1286,7 @@ bool Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size) {
                       GetInteger(vaddr));
             mapped = false;
         },
-        [&] { rasterizer = true; });
+        [&](u8*) { rasterizer = true; });
     if (rasterizer) {
         impl->InvalidateGPUMemory(ptr, size);
     }
