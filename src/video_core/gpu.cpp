@@ -208,12 +208,13 @@ struct GPU::Impl {
 
     void MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func) {
         const u64 id = pending_maps.Add(gpu_addr, size);
-        gpu_thread.Run(
+        gpu_thread.MapRun(
+            gpu_addr, size,
             [this, id, func = std::move(func)] {
                 func();
                 pending_maps.Remove(id);
             },
-            is_async, true);
+            is_async);
     }
 
     bool IsMapPending(GPUVAddr gpu_addr, u64 size) const {

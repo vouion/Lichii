@@ -164,7 +164,15 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     if (run->before_later_reads) {
                         // GPU memory maps unmap caches (UnmapMemory downloads): the back's state.
                         split.DeferFunction(std::move(wrapped));
-                        split.Drain(VideoCommon::DrainSite::Map);
+                        // The map only needs the writes to its own range current, not the whole
+                        // back; narrow the drain (falls back to the full drain when the range is
+                        // unknown or the pending set overflows).
+                        if (run->map_size != 0 &&
+                            split.WaitForWritesTo(run->map_addr, run->map_size)) {
+                            // The range's writes are current; nothing else needs draining.
+                        } else {
+                            split.Drain(VideoCommon::DrainSite::Map);
+                        }
                     } else {
                         split.DeferFunction(std::move(wrapped));
                     }
@@ -228,6 +236,14 @@ void ThreadManager::TickGPU(bool is_async) {
 
 void ThreadManager::Run(std::function<void()>&& func, bool is_async, bool before_later_reads) {
     PushCommand(RunCommand{std::move(func), before_later_reads}, false, is_async);
+}
+
+void ThreadManager::MapRun(GPUVAddr map_addr, u64 map_size, std::function<void()>&& func,
+                           bool is_async) {
+    RunCommand cmd{std::move(func), true};
+    cmd.map_addr = map_addr;
+    cmd.map_size = map_size;
+    PushCommand(std::move(cmd), false, is_async);
 }
 
 void ThreadManager::InvalidateRegion(DAddr addr, u64 size) {
