@@ -87,7 +87,13 @@ public:
     template <typename Func>
     void TraceGpuWork(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
                       std::array<u32, 3> size, Func&& work) {
-        if (!trace_gpu_recording || !trace_work_pool || trace_work_count == TraceMaxWork) {
+        // Per-draw timestamps are OFF unless EDEN_NX2_GPU_WORK_TRACE=1: a BOTTOM_OF_PIPE
+        // timestamp drains the pipeline, so one pair per draw serialises every draw and
+        // forbids overlap (~2672 drains/frame) - the instrumentation itself measured as the
+        // "22 us/draw" wall. Only the per-submission pair (TraceGpuSubmission) runs by default.
+        static const bool work_trace{std::getenv("EDEN_NX2_GPU_WORK_TRACE") != nullptr};
+        if (!work_trace || !trace_gpu_recording || !trace_work_pool ||
+            trace_work_count == TraceMaxWork) {
             work();
             return;
         }
