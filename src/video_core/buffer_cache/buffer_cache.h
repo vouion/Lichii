@@ -1019,6 +1019,10 @@ void BufferCache<P>::PopAsyncBuffers() {
             device_memory.WriteBlockUnsafe(start, &read_mapped_memory[start - device_addr],
                                            end - start);
             gpu_modified_ranges.Subtract(start, end - start);
+            // The GPU's data has landed in guest memory: the page is no longer GPU-written, so
+            // the culling readback's fast paths (LIGHT_DRAIN / DMA_WAIT_WRITERS / SEM_FAST) can
+            // use it instead of degenerating to a full drain (the sticky-bit bug).
+            Tegra::Nx2ClearGpuWritten(start, end - start);
         });
     }
     async_buffers_death_ring.emplace_back(*async_buffer);

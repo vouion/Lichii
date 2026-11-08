@@ -122,6 +122,27 @@ inline void Nx2ClearGpuWrittenPages() {
     return (g_nx2_gpu_written_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1;
 }
 
+/// Marks [device_address, device_address + size) as no longer GPU-written, i.e. its data has
+/// landed in guest memory (a download). Without this the bit is sticky for the whole session, so
+/// every culling page stays "GPU written" forever and LIGHT_DRAIN / DMA_WAIT_WRITERS / SEM_FAST
+/// degenerate to the full drain on exactly the pages that matter.
+inline void Nx2ClearGpuWritten(u64 device_address, u64 size) {
+    if (size == 0) {
+        return;
+    }
+    const u64 first = device_address >> Nx2WrittenPageBits;
+    const u64 last = (device_address + size - 1) >> Nx2WrittenPageBits;
+    for (u64 page = first;; ++page) {
+        if (page < g_nx2_gpu_written_pages.size() * 64) {
+            g_nx2_gpu_written_pages[page / 64].fetch_and(~(u64{1} << (page % 64)),
+                                                        std::memory_order_relaxed);
+        }
+        if (page == last) {
+            break;
+        }
+    }
+}
+
 inline constexpr size_t Nx2MaxSemaphoreRegions = 32;
 inline std::array<std::atomic<u64>, Nx2MaxSemaphoreRegions> g_nx2_semaphore_regions{}; // starts
 
