@@ -172,6 +172,15 @@ public:
         return build->IsBuilt();
     }
 
+    /// Waits up to `timeout` for the build; true when built.
+    [[nodiscard]] bool WaitBuilt(std::chrono::microseconds timeout) const {
+        return build->WaitFor(timeout);
+    }
+
+    [[nodiscard]] bool Failed() const noexcept {
+        return build->Failed();
+    }
+
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
         return [](GraphicsPipeline* pl, bool is_indexed) { return pl->ConfigureImpl<Spec>(is_indexed); };
