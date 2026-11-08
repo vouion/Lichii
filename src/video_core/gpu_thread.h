@@ -85,10 +85,6 @@ struct RunCommand final {
     /// With the GPU split, run on its front (after draining the back) instead of deferring to the
     /// back, so command lists read after this one see what func did (GMMU maps).
     bool before_later_reads{};
-    /// The mapped range (MapInOrder): the drain only needs the writes to these words, not the
-    /// whole back. 0 size = unknown, fall back to the full drain.
-    GPUVAddr map_addr{};
-    u64 map_size{};
 };
 
 using CommandData =
@@ -146,7 +142,6 @@ public:
 
     /// Runs func on the GPU thread once the commands queued before it have been processed.
     void Run(std::function<void()>&& func, bool is_async, bool before_later_reads = false);
-    void MapRun(GPUVAddr map_addr, u64 map_size, std::function<void()>&& func, bool is_async);
 
     void NotifyShutdown();
     [[nodiscard]] bool IsIdleOnPendingSemaphore() const noexcept {
