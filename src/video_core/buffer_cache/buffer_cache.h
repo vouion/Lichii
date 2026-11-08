@@ -1022,7 +1022,15 @@ void BufferCache<P>::PopAsyncBuffers() {
             // The GPU's data has landed in guest memory: the page is no longer GPU-written, so
             // the culling readback's fast paths (LIGHT_DRAIN / DMA_WAIT_WRITERS / SEM_FAST) can
             // use it instead of degenerating to a full drain (the sticky-bit bug).
-            Tegra::Nx2ClearGpuWritten(start, end - start);
+            // EDEN_NX2_CLEAR_GPU_WRITTEN=0 keeps the sticky mark (A/B for the washed-out
+            // bright-scene bug): the clear is per page while this range can be partial, so a page
+            // with a newer queued GPU write still in flight loses its mark and the fast paths read
+            // it unflushed.
+            static const bool clear_gpu_written =
+                std::getenv("EDEN_NX2_CLEAR_GPU_WRITTEN") == nullptr;
+            if (clear_gpu_written) {
+                Tegra::Nx2ClearGpuWritten(start, end - start);
+            }
         });
     }
     async_buffers_death_ring.emplace_back(*async_buffer);
