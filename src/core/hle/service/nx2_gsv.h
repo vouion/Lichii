@@ -1957,8 +1957,9 @@ private:
             return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
         }();
         // EDEN_NX2_TARGET_FPS=<n> caps the presented rate at n fps; 0 keeps the game's requested
-        // pace. Unset, Ocarina of Time locks to 30 fps: its light scenes raced to 60 while its
-        // heavy ones sank into the twenties, and one steady 30 is the smoother trade.
+        // pace. Unset, Ocarina of Time locks to 60 fps: the paced grid keeps a steady output while
+        // the measured frame-delta hook holds game speed real-time at any rate. EDEN_NX2_TARGET_FPS=30
+        // restores the earlier steady-30 trade for heavy scenes.
         static const int forced_target_fps = [] {
             const char* const value = std::getenv("EDEN_NX2_TARGET_FPS");
             if (value == nullptr) {
@@ -1970,7 +1971,7 @@ private:
         int target_fps = forced_target_fps;
         if (target_fps < 0) {
             target_fps =
-                process != nullptr && process->GetProgramId() == Nx2OotTime::ProgramId ? 30 : 0;
+                process != nullptr && process->GetProgramId() == Nx2OotTime::ProgramId ? 60 : 0;
         }
         const bool mkw_dynamic =
             process != nullptr && process->GetProgramId() == Settings::MarioKartWorldProgramId &&
