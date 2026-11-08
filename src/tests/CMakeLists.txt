@@ -52,6 +52,7 @@ add_executable(tests
     video_core/native_pending_policy.cpp
     video_core/framebuffer_clear_layers.cpp
     video_core/clear_ordering_harness.cpp
+    video_core/renderpass_continuation.cpp
     video_core/texture_cache_test_context.h
     video_core/tic_binding_limits.cpp
     video_core/format_lookup_unusual.cpp

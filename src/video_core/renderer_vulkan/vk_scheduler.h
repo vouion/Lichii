@@ -44,6 +44,39 @@ class StateTracker;
 
 struct QueryCacheParams;
 
+/// Identity of the render pass a draw is currently inside.
+struct RenderPassBinding {
+    VkRenderPass renderpass{}; ///< VK_NULL_HANDLE while no pass is open
+    VkFramebuffer framebuffer{};
+    const void* framebuffer_key{}; ///< the Framebuffer object the pass was begun for
+    VkExtent2D render_area{};
+    /// The open pass is a deferred clear's loadOp=CLEAR variant of `framebuffer`: its loadOps ran
+    /// once at begin and its storeOps match the base pass, so a draw may stay inside it.
+    bool load_variant_only{};
+};
+
+/// Whether a draw into `requested` stays in `active` instead of ending and re-beginning it.
+[[nodiscard]] inline bool CanContinueRenderPass(const RenderPassBinding& active,
+                                                const RenderPassBinding& requested) {
+    // No pass is open: a query copy, upload, dispatch or clear ended it, and EndRenderPass leaves
+    // the framebuffer behind. Matching the target alone would record the draw with no render pass.
+    if (active.renderpass == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (requested.framebuffer != active.framebuffer ||
+        requested.framebuffer_key != active.framebuffer_key) {
+        return false;
+    }
+    if (requested.render_area.width != active.render_area.width ||
+        requested.render_area.height != active.render_area.height) {
+        return false;
+    }
+    // The same pass, or a deferred clear variant of it: restarting would only re-LOAD what the
+    // clear just wrote. A variant that discards stores (MSAA scratch) never continues, so a load
+    // the base pass would keep is never skipped.
+    return requested.renderpass == active.renderpass || active.load_variant_only;
+}
+
 /// The scheduler abstracts command buffer and fence management with an interface that's able to do
 /// OpenGL-like operations on Vulkan command buffers.
 class Scheduler {
@@ -165,6 +198,18 @@ public:
 
     /// Returns true when the descriptor buffer chunk has to be bound into the command buffer.
     bool UpdateDescriptorBufferChunk(u32 descriptor_chunk);
+
+    /// Returns true when the descriptor buffer offsets still have to be set for this layout.
+    bool UpdateDescriptorBufferOffsets(VkPipelineLayout layout, u32 descriptor_chunk,
+                                       VkDeviceSize offset);
+
+    /// Returns true when these push constant words still have to be recorded. The memo lives for
+    /// one render pass: a pass end, a blit or a dispatch clears it (they either push their own
+    /// constants or close the pass the memo belongs to), so nothing outside the draws of the
+    /// open pass can leave a stale entry behind. Keyed on the layout too, so a skip always
+    /// repeats a push made by the layout the draw binds.
+    bool UpdatePushConstants(VkPipelineLayout layout, VkShaderStageFlags stages, u32 offset,
+                             const void* data, u32 size);
 
     /// Invalidates current command buffer state except for render passes
     void InvalidateState();
@@ -402,7 +447,9 @@ private:
     struct State {
         VkRenderPass renderpass{};
         VkFramebuffer framebuffer{};
+        const Framebuffer* framebuffer_ptr = nullptr;
         VkExtent2D render_area = {0, 0};
+        bool renderpass_load_variant = false;
         GraphicsPipeline* graphics_pipeline = nullptr;
         bool is_rescaling = false;
         bool rescaling_defined = false;
@@ -410,6 +457,22 @@ private:
         bool needs_state_enable_refresh = false;
         u32 descriptor_buffer_chunk = 0;
         bool descriptor_buffer_bound = false;
+        VkPipelineLayout descriptor_offsets_layout{};
+        u32 descriptor_offsets_chunk{};
+        VkDeviceSize descriptor_offsets_offset{};
+        bool descriptor_offsets_valid = false;
+        static constexpr size_t PUSH_CONSTANT_MEMOS = 4;
+        struct PushConstantMemo {
+            static constexpr size_t DATA_SIZE = 32;
+            VkPipelineLayout layout{};
+            VkShaderStageFlags stages{};
+            u32 offset{};
+            u32 size{};
+            std::array<u8, DATA_SIZE> data{};
+            bool valid = false;
+        };
+        std::array<PushConstantMemo, PUSH_CONSTANT_MEMOS> push_constant_memos{};
+        u32 push_constant_rotation = 0;
     };
 
     struct DeferredClear {
@@ -421,8 +484,10 @@ private:
     };
 
     /// Begins a render pass for the given framebuffer, optionally with clear values.
+    /// `load_variant_only` marks a deferred clear's pass as continuable by the draws that follow.
     void BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
-                             const VkClearValue* clear_values, u32 clear_value_count);
+                             const VkClearValue* clear_values, u32 clear_value_count,
+                             bool load_variant_only = false);
 
     /// If a deferred clear is pending.
     void RealizeDeferredClear();

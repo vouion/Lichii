@@ -40,7 +40,15 @@ public:
     template <typename SyncValuesType>
     void SyncValues(std::span<SyncValuesType> values, VkBuffer base_src_buffer = VkBuffer{});
 
-    void Barriers(bool is_prebarrier);
+    /// Arms the sync group's read barrier: the first query copy records it (NoteSyncCopy).
+    void BeginSyncBarriers();
+
+    /// Records the armed read barrier in front of a query copy of this sync group.
+    void NoteSyncCopy();
+
+    /// Records the write barrier when the group copied something; a group that copied nothing
+    /// ends no render pass and drains nothing.
+    void EndSyncBarriers();
 
     void EndHostConditionalRendering();
 
