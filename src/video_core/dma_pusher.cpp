@@ -138,7 +138,13 @@ bool DmaPusher::Step() {
         // newly GPU-written for 2 s (SkipWriterWait), =2 checks each skipped entry on the back.
         if (auto& split = VideoCommon::GpuSplit::Get();
             split.Active() && !SkipWriterWait(u64{header.size} * sizeof(u32))) {
-            split.WaitForWriters();
+            // Only the writes to this command list's words can make its pages stale; waiting for
+            // every queued writer (WaitForWriters) is far broader than the dependency. Narrow to
+            // the list's range, falling back to the full wait when the range cannot be resolved.
+            const u64 list_bytes = u64{header.size} * sizeof(u32);
+            if (!split.WaitForWritesTo(dma_state.dma_get, list_bytes)) {
+                split.WaitForWriters();
+            }
         }
         bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get,
                                                  size_t{header.size} * sizeof(u32));
