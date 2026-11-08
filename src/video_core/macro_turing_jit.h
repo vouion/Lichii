@@ -13,9 +13,67 @@
 // Eden's Xbyak configuration (its hash maps): every translation unit must see the same one.
 #include "common/x64/xbyak.h"
 
+#include "video_core/macro_memo.h"
 #include "video_core/macro_turing.h"
 
 namespace Tegra {
+
+/// One call's data RAM accesses, recorded by the generated code for the macro memo
+/// (macro_memo.h): (address, value) pairs in access order, with WriteBit set on a write's
+/// address. Reused between calls (a macro never runs reentrantly): Clear before each one.
+/// When the buffer fills, recording stops and `overflowed` marks an incomplete log, which
+/// must never be remembered.
+struct TuringDramLog {
+    static constexpr std::uint32_t WriteBit = std::uint32_t{1} << 31;
+    static constexpr std::size_t CapacityWords = 4096; // Two words per access.
+
+    void Clear() noexcept {
+        used = 0;
+        overflowed = false;
+    }
+
+    [[nodiscard]] std::uint32_t* Next() noexcept {
+        return words.data() + used;
+    }
+
+    [[nodiscard]] std::uint32_t* End() noexcept {
+        return words.data() + CapacityWords;
+    }
+
+    void Commit(std::uint32_t* next, bool overflow) noexcept {
+        used = static_cast<std::size_t>(next - words.data());
+        overflowed = overflow;
+    }
+
+    /// Splits the log into the memo's (address, value) lists. Returns false when the call
+    /// read a word it had written itself: its reads then depend on its own writes, which the
+    /// memo's guards cannot key on (the interpreter reports the same as `reread_data_ram`).
+    bool Split(MacroMemoPairs& reads, MacroMemoPairs& writes) const {
+        reads.clear();
+        writes.clear();
+        bool reread = false;
+        for (std::size_t i = 0; i + 1 < used; i += 2) {
+            const std::uint32_t raw_address = words[i];
+            const std::uint32_t address = raw_address & ~WriteBit;
+            const std::uint32_t value = words[i + 1];
+            if (raw_address & WriteBit) {
+                writes.emplace_back(address, value);
+                continue;
+            }
+            for (const auto& [write_address, write_value] : writes) {
+                if (write_address == address) {
+                    reread = true;
+                }
+            }
+            reads.emplace_back(address, value);
+        }
+        return !reread;
+    }
+
+    std::array<std::uint32_t, CapacityWords> words{};
+    std::size_t used{};
+    bool overflowed{};
+};
 
 // x86-64 code for the TU104/GA10x MME: every instruction of the uploaded macro memory compiled
 // once (each a block that falls through to the next one, branches and loops through a jump
@@ -53,6 +111,12 @@ public:
         bool (*emit)(State*, Word method, Word value);
         Word (*read)(State*, Word address);
         const std::vector<Word>* fifo;
+        // The macro memo's data RAM access log (TuringDramLog): where to append the next
+        // (address, value) pair and where to stop. Equal pointers mean "not recording", and
+        // every access then reports overflow so the caller keeps no record of the call.
+        Word* dram_log;
+        Word* dram_log_end;
+        std::uint8_t dram_log_overflow;
     };
 
     enum Error : Word {
@@ -99,9 +163,12 @@ public:
         compiled_generation = generation;
     }
 
+    /// Runs the macro. When `dram_log` is set, every data RAM access is appended to it for
+    /// the macro memo (TuringDramLog); pass the log only when the caller will remember the
+    /// call, and Clear it first.
     template <typename Read, typename Emit>
     Result Execute(Word start, std::vector<Word>& parameters, std::span<Word> data_ram, Read read,
-                   Emit emit) {
+                   Emit emit, TuringDramLog* dram_log = nullptr) {
         State state;
         state.regs.fill(0);
         state.carry = state.method = state.increment = 0;
@@ -115,11 +182,17 @@ public:
         state.params_size = static_cast<Word>(parameters.size());
         state.dram = data_ram.data();
         state.fifo = &parameters;
+        state.dram_log = dram_log ? dram_log->Next() : nullptr;
+        state.dram_log_end = dram_log ? dram_log->End() : nullptr;
+        state.dram_log_overflow = 0;
         Thunks<Read, Emit> thunks{read, emit};
         state.user = &thunks;
         state.emit = &Thunks<Read, Emit>::CallEmit;
         state.read = &Thunks<Read, Emit>::CallRead;
         const Word error = program->entry(&state);
+        if (dram_log) {
+            dram_log->Commit(state.dram_log, state.dram_log_overflow != 0);
+        }
         if (error == None) {
             return {true, state.fail_pc, state.consumed, {}};
         }
@@ -476,6 +549,29 @@ private:
             movzx(eax, al);
         }
 
+        // Appends a data RAM access ((address, value); a write ORs the address with
+        // TuringDramLog::WriteBit) to the memo's log, or marks the log incomplete once it is
+        // full. Keeps eax, ecx and edx (the lane's result and operands).
+        void LogDram(const Xbyak::Reg32& address, const Xbyak::Reg32& value, bool write) {
+            Xbyak::Label full, done;
+            mov(r8, qword[st + offsetof(State, dram_log)]);
+            cmp(r8, qword[st + offsetof(State, dram_log_end)]);
+            jae(full, T_NEAR);
+            if (write) {
+                mov(r9d, address.cvt32());
+                or_(r9d, TuringDramLog::WriteBit);
+                mov(dword[r8], r9d);
+            } else {
+                mov(dword[r8], address.cvt32());
+            }
+            mov(dword[r8 + 4], value);
+            add(qword[st + offsetof(State, dram_log)], 8);
+            jmp(done, T_NEAR);
+            L(full);
+            mov(byte[st + offsetof(State, dram_log_overflow)], 1);
+            L(done);
+        }
+
         void Lane(Word pc, const Decoded& d, Word lane) {
             const Word imm = d.imm[lane];
             const Word op = d.op[lane];
@@ -634,12 +730,14 @@ private:
                 jae(fail_dread, T_NEAR);
                 mov(rax, qword[st + offsetof(State, dram)]);
                 mov(eax, dword[rax + rcx * 4]);
+                LogDram(ecx, eax, false);
                 return;
             case 31:
                 cmp(ecx, 0xc00);
                 jae(fail_dwrite, T_NEAR);
                 mov(rax, qword[st + offsetof(State, dram)]);
                 mov(dword[rax + rcx * 4], edx);
+                LogDram(ecx, edx, true);
                 xor_(eax, eax);
                 return;
             default:

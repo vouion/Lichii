@@ -1360,7 +1360,11 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
         VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
         engine.native_interpreter.active_dram = &native_data_ram;
         const auto parameter_count = fs.parameters.size();
-        const auto read = [&fs](u32 address) {
+        // What the call reads besides its parameters, for the macro memo's guards.
+        bool read_register = false;
+        bool read_memory = false;
+        const auto read = [&fs, &read_register](u32 address) {
+            read_register = true;
             return address < Regs::NUM_REGS ? fs.regs[address] : 0U;
         };
         constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
@@ -1386,19 +1390,68 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             FrontWrite(split, fs, address, value, true, true);
             // MME_DMA_READ (into data RAM) and MME_DMA_READ_FIFOED (into the load FIFO).
             if (address == 0x157 || address == 0x158) {
+                read_memory = true;
                 FrontDmaRead(split, fs, method, address, value);
             }
             return true;
         };
+        // A successful run (a replayed call counts: its record came from a successful one).
+        TuringMacroInterpreter::Result result{true, 0, 0, {}};
 #ifdef ARCHITECTURE_x86_64
-        if (!engine.native_jit) {
-            engine.native_jit = std::make_shared<TuringMacroJit>();
+        // EDEN_NX2_MME_MEMO=0: run every call instead of replaying remembered ones
+        // (macro_memo.h), as MacroEngine::Execute does when the split is off. A hit replays
+        // the recorded writes through the emit above: ring writes, shadow RAM, the const
+        // buffer batching and draw_pending stay identical to a real run.
+        static const bool use_memo = [] {
+            const char* value = std::getenv("EDEN_NX2_MME_MEMO");
+            return value == nullptr || value[0] != '0';
+        }();
+        bool replayed = false;
+        if (use_memo) {
+            engine.native_memo.Synchronize(engine.native_code_generation);
+            if (decltype(engine.native_memo)::Effects effects;
+                engine.native_memo.Find(start, fs.parameters, native_data_ram, effects)) {
+                for (size_t i = 0; i < effects.data_ram_writes.size(); i += 2) {
+                    native_data_ram[effects.data_ram_writes[i]] = effects.data_ram_writes[i + 1];
+                }
+                for (size_t i = 0; i < effects.writes.size(); i += 2) {
+                    emit(effects.writes[i], effects.writes[i + 1]);
+                }
+                replayed = true;
+            } else {
+                engine.native_writes.clear();
+            }
         }
-        engine.native_jit->Prepare(engine.native_code, engine.native_code_generation);
-        const auto result = engine.native_jit->Execute(
-            start, fs.parameters, std::span<u32>{native_data_ram}, read, emit);
+        if (!replayed) {
+            if (!engine.native_jit) {
+                engine.native_jit = std::make_shared<TuringMacroJit>();
+            }
+            engine.native_jit->Prepare(engine.native_code, engine.native_code_generation);
+            const u64 code_generation = engine.native_code_generation;
+            static thread_local Tegra::TuringDramLog dram_log;
+            dram_log.Clear();
+            result = engine.native_jit->Execute(
+                start, fs.parameters, std::span<u32>{native_data_ram}, read,
+                [&](u32 address, u32 value) {
+                    if (use_memo) {
+                        engine.native_writes.emplace_back(address, value);
+                    }
+                    return emit(address, value);
+                },
+                use_memo ? &dram_log : nullptr);
+            // Remember the call with the same guards as MacroEngine::Execute: no register
+            // read, no DMA read, and the recorded data RAM reads still holding.
+            if (use_memo && result.success && !read_memory && !read_register &&
+                !dram_log.overflowed && code_generation == engine.native_code_generation) {
+                Tegra::MacroMemoPairs reads, writes;
+                if (dram_log.Split(reads, writes)) {
+                    engine.native_memo.Store(start, fs.parameters, reads, writes,
+                                             engine.native_writes);
+                }
+            }
+        }
 #else
-        const auto result =
+        result =
             engine.native_interpreter.Execute(engine.native_code, start, fs.parameters, read, emit);
 #endif
         flush_cb();

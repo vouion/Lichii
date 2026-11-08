@@ -1482,34 +1482,10 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                 }
                 return true;
             };
-#ifdef ARCHITECTURE_x86_64
-        // Macro code runs compiled to x86-64 (macro_turing_jit.h) instead of through the memo
-        // and the interpreter; EDEN_NX2_MME_JIT=0 goes back to those.
-        static const bool use_jit = [] {
-            const char* value = std::getenv("EDEN_NX2_MME_JIT");
-            return value == nullptr || value[0] != '0';
-        }();
-        if (use_jit) {
-            if (!native_jit) {
-                native_jit = std::make_shared<TuringMacroJit>();
-            }
-            native_jit->Prepare(native_code, native_code_generation);
-            fifo.assign(parameters.begin(), parameters.end());
-            const auto result = native_jit->Execute(
-                method, fifo, std::span<u32>{*native_interpreter.active_dram},
-                [&](u32 address) {
-                    return address < Maxwell3D::Regs::NUM_REGS ? maxwell3d.GetRegisterValue(address) : 0U;
-                },
-                emit);
-            if (!result.success) {
-                native_execution_failed = true;
-                LOG_ERROR(HW_GPU, "Native MME (JIT) failed: start={:#x}, consumed={}/{}, error={}",
-                          method, result.consumed, parameters.size(), result.error);
-            }
-            return;
-        }
-#endif
-        // EDEN_NX2_MME_MEMO=0: interpret every call (see macro_memo.h).
+        // EDEN_NX2_MME_MEMO=0: run every call instead of replaying remembered ones (see
+        // macro_memo.h). A remembered call's effects depend only on its start address, its
+        // parameters and the data RAM words it read, so the JIT and the interpreter below
+        // both serve a hit through the emit above.
         static const bool use_memo = [] {
             const char* value = std::getenv("EDEN_NX2_MME_MEMO");
             return value == nullptr || value[0] != '0';
@@ -1541,6 +1517,54 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
             }
             native_writes.clear();
         }
+#ifdef ARCHITECTURE_x86_64
+        // Macro code runs compiled to x86-64 (macro_turing_jit.h) instead of through the
+        // interpreter; EDEN_NX2_MME_JIT=0 goes back to it.
+        static const bool use_jit = [] {
+            const char* value = std::getenv("EDEN_NX2_MME_JIT");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (use_jit) {
+            if (!native_jit) {
+                native_jit = std::make_shared<TuringMacroJit>();
+            }
+            native_jit->Prepare(native_code, native_code_generation);
+            fifo.assign(parameters.begin(), parameters.end());
+            const u64 code_generation = native_code_generation;
+            // What the call read besides its parameters, for the memo's guards as the
+            // interpreter reports them below: any register read, any data RAM read of a word
+            // the call had written itself, or an incomplete access log keeps it unstored.
+            bool read_register = false;
+            static thread_local TuringDramLog dram_log;
+            dram_log.Clear();
+            const auto result = native_jit->Execute(
+                method, fifo, std::span<u32>{*native_interpreter.active_dram},
+                [&](u32 address) {
+                    read_register = true;
+                    return address < Maxwell3D::Regs::NUM_REGS ? maxwell3d.GetRegisterValue(address) : 0U;
+                },
+                [&](u32 address, u32 value) {
+                    if (use_memo) {
+                        native_writes.emplace_back(address, value);
+                    }
+                    return emit(address, value);
+                },
+                use_memo ? &dram_log : nullptr);
+            if (use_memo && result.success && !read_memory && !read_register &&
+                !dram_log.overflowed && code_generation == native_code_generation) {
+                MacroMemoPairs reads, writes;
+                if (dram_log.Split(reads, writes)) {
+                    native_memo.Store(method, parameters, reads, writes, native_writes);
+                }
+            }
+            if (!result.success) {
+                native_execution_failed = true;
+                LOG_ERROR(HW_GPU, "Native MME (JIT) failed: start={:#x}, consumed={}/{}, error={}",
+                          method, result.consumed, parameters.size(), result.error);
+            }
+            return;
+        }
+#endif
         fifo.assign(parameters.begin(), parameters.end());
         const u64 code_generation = native_code_generation;
         const auto result = native_interpreter.Execute(native_code, method, fifo,
