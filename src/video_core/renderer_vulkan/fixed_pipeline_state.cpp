@@ -254,16 +254,10 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
         dynamic_state.Refresh2(regs, topology_, extended_dynamic_state_2);
     }
     if (!extended_dynamic_state_3_blend) {
-        // A key's attachments start zeroed; a pipeline created before any blending write would
-        // freeze mask=0 and silently discard every colour write while depth keeps writing (the
-        // white screen). A legitimately refreshed mask set is never all-zero - the register
-        // defaults are ones, and the color_write_enable clamp below normalises explicit zeros -
-        // so an all-zero set means the refresh never ran: force it once.
-        const bool never_refreshed = std::ranges::all_of(attachments, [](const auto& attachment) {
-            return attachment.mask_r == 0 && attachment.mask_g == 0 && attachment.mask_b == 0 &&
-                   attachment.mask_a == 0;
-        });
-        if (maxwell3d.dirty.flags[Dirty::Blending] || never_refreshed) {
+        // Always rebuilt: a blend register written without raising Dirty::Blending (native
+        // Switch 2 command paths) left a stale state in the key (Ocarina forest fog drawn
+        // without blending = black screen on GPUs without dynamic blend state, e.g. AMD).
+        {
             maxwell3d.dirty.flags[Dirty::Blending] = false;
             for (size_t index = 0; index < attachments.size(); ++index) {
                 attachments[index].Refresh(regs, index);
