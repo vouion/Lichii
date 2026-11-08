@@ -1175,7 +1175,11 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         return;
     }
 
+    // EDEN_NX2_DEFERRED_CLEAR=0 disables the deferred load-op clear (A/B for the washed-out
+    // bright-scene bug: a parked clear can land where a LOAD was intended, wiping the target).
     constexpr bool ENABLE_DEFERRED_CLEAR = true;
+    static const bool enable_deferred_clear =
+        ENABLE_DEFERRED_CLEAR && std::getenv("EDEN_NX2_DEFERRED_CLEAR") == nullptr;
     const bool color_full_channels = regs.clear_surface.R && regs.clear_surface.G &&
                                      regs.clear_surface.B && regs.clear_surface.A;
     const bool stencil_partial = use_stencil && framebuffer->HasAspectStencilBit() &&
@@ -1263,7 +1267,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         clear_rect.rect.offset.x == 0 && clear_rect.rect.offset.y == 0 &&
         clear_rect.rect.extent.width >= render_area.width &&
         clear_rect.rect.extent.height >= render_area.height;
-    const bool can_defer_clear = ENABLE_DEFERRED_CLEAR && (!regs.clear_control.use_scissor || clear_covers_render_area) &&
+    const bool can_defer_clear = enable_deferred_clear && (!regs.clear_control.use_scissor || clear_covers_render_area) &&
                                  clear_layers.covers_all_layers &&
                                  !scheduler.IsRenderPassActive() &&
                                  (!use_color || color_full_channels) && ds_deferrable;
