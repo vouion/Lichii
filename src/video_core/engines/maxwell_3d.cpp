@@ -1544,6 +1544,32 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     const u32 ram = fs.regs[0x156];
     const u32 words = std::min<u32>(count, 0x1000);
     const size_t read_bytes = size_t{words} * sizeof(u32);
+    // EDEN_NX2_STALE_MACRO_READ=1: serve the macro readback from guest memory as it stands now,
+    // never waiting for the culling dispatch that produces it (a one-frame culling latency, the
+    // non-blocking GPU-driven-rendering readback). This removes the ~550 culling round-trips a
+    // frame that serialize front<->back (the measured, resolution-independent wall). Trade-off:
+    // a moving camera can cull edge objects one frame late. Gated for A/B; =2 re-syncs one read
+    // in N so a stale count cannot run away.
+    static const int stale_macro_read = [] {
+        const char* const v = std::getenv("EDEN_NX2_STALE_MACRO_READ");
+        return v == nullptr ? 0 : v[0] == '2' ? 2 : 1;
+    }();
+    if (stale_macro_read != 0) {
+        static thread_local u32 stale_tick{};
+        const bool resync = stale_macro_read == 2 && (++stale_tick % 64) == 0;
+        if (!resync) {
+            std::vector<u32> stale(words);
+            memory_manager.ReadBlockUnsafe(source, stale.data(), read_bytes);
+            for (u32 i = 0; i < words; ++i) {
+                if (method == 0x158) {
+                    fs.parameters.push_back(stale[i]);
+                } else if (ram + i < native_data_ram.size()) {
+                    native_data_ram[ram + i] = stale[i];
+                }
+            }
+            return;
+        }
+    }
     // The macros re-read the same guest tables thousands of times a second; between writes the
     // words are stable, so serve them from the cache when no write has been noted to the range
     // since the capture (queued or landed - the ring covers far more than one inter-read gap).
