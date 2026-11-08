@@ -21,9 +21,12 @@ namespace VideoCommon {
 // image views bake the descriptor swizzle (the format=0 / wrong-swizzle green corruption), so
 // caches built before them must not be reused. Bumped again for the pool-read correction
 // (913d5994): serialized environments retain decoded texture types and formats, so a cache
-// produced by the intermediate broken build (49/53) would survive that correction.
+// produced by the intermediate broken build (49/53) would survive that correction. Bumped again
+// for the global memory word-split emission (sharkiix's colour fix): 8/16-byte accesses are read
+// word by word so a binding that is only 4-byte aligned no longer shifts every component by one
+// word, and the cache must not keep pipelines built from the shifted emission.
 inline constexpr u32 OpenGLPipelineCacheVersion = 50;
-inline constexpr u32 VulkanPipelineCacheVersion = 54;
+inline constexpr u32 VulkanPipelineCacheVersion = 55;
 
 // Official Eglantine (cache version 18 at c0cb3325) and this fork (a different version) both
 // used <shader dir>/<title>/vulkan.bin and vulkan_pipelines.bin. Each build deletes a file

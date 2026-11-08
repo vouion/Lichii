@@ -1016,7 +1016,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             const Id ssbo_offset{OpUConvert(U32[1], OpISub(U64, addr, ssbo_addr))};
             const Id ssbo_index{OpShiftRightLogical(U32[1], ssbo_offset, Const(shift))};
             const Id ssbo_pointer{OpAccessChain(element_pointer, ssbo_id, zero, ssbo_index)};
-            callback(ssbo_pointer);
+            callback(ssbo_pointer, ssbo_id, ssbo_index);
             AddLabel(else_label);
         }};
         if (info.native_global_bounds) {
@@ -1058,20 +1058,35 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         const Id function_type{TypeFunction(type, U64)};
         const Id func_id{OpFunction(type, spv::FunctionControlMask::MaskNone, function_type)};
         const Id addr{OpFunctionParameter(U64)};
-        if (!profile.support_descriptor_aliasing && shift > 2) {
-            AddLabel();
-            std::array<Id, 4> words;
+        // Buffers are bound at the device's storage buffer alignment (4 bytes on AMD), so an
+        // aligned 8 or 16 byte guest access can sit at any word of the binding: indexing the
+        // vector array (offset >> shift) would read the vector before it, shifting every
+        // component by one or more words (Ocarina's light colours lost their red). Those
+        // accesses go word by word.
+        const bool split_words{shift > 2 && (!profile.support_descriptor_aliasing ||
+                                             profile.min_ssbo_alignment < (1U << shift))};
+        // The buffer is found once and the words read from its word view (calling the word
+        // function per word repeated the buffer search and overflowed AMD's shader compiler).
+        if (split_words) {
             const u32 count = 1U << (shift - 2);
-            for (u32 i = 0; i < count; ++i) {
-                const Id word_address{OpIAdd(U64, addr, Constant(U64, i * sizeof(u32)))};
-                words[i] = OpFunctionCall(U32[1], load_global_func_u32, word_address);
-            }
-            OpReturnValue(OpCompositeConstruct(type, std::span{words}.first(count)));
+            define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2,
+                        [&](Id, Id ssbo_id, Id word_index) {
+                            std::array<Id, 4> words;
+                            for (u32 i = 0; i < count; ++i) {
+                                const Id index{i == 0 ? word_index
+                                                      : OpIAdd(U32[1], word_index, Const(i))};
+                                words[i] = OpLoad(U32[1], OpAccessChain(storage_types.U32.element,
+                                                                        ssbo_id, zero, index));
+                            }
+                            OpReturnValue(
+                                OpCompositeConstruct(type, std::span{words}.first(count)));
+                        });
+            OpReturnValue(ConstantNull(type));
             OpFunctionEnd();
             return func_id;
         }
         define_body(ssbo_member, addr, element_pointer, shift,
-                    [&](Id ssbo_pointer) { OpReturnValue(OpLoad(type, ssbo_pointer)); });
+                    [&](Id ssbo_pointer, Id, Id) { OpReturnValue(OpLoad(type, ssbo_pointer)); });
         OpReturnValue(ConstantNull(type));
         OpFunctionEnd();
         return func_id;
@@ -1081,19 +1096,26 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         const Id func_id{OpFunction(void_id, spv::FunctionControlMask::MaskNone, function_type)};
         const Id addr{OpFunctionParameter(U64)};
         const Id data{OpFunctionParameter(type)};
-        if (!profile.support_descriptor_aliasing && shift > 2) {
-            AddLabel();
+        // Same as the loads: vector stores at a word that is not a multiple of their size.
+        if (shift > 2 && (!profile.support_descriptor_aliasing ||
+                          profile.min_ssbo_alignment < (1U << shift))) {
             const u32 count = 1U << (shift - 2);
-            for (u32 i = 0; i < count; ++i) {
-                const Id word_address{OpIAdd(U64, addr, Constant(U64, i * sizeof(u32)))};
-                const Id word{OpCompositeExtract(U32[1], data, i)};
-                OpFunctionCall(void_id, write_global_func_u32, word_address, word);
-            }
+            define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2,
+                        [&](Id, Id ssbo_id, Id word_index) {
+                            for (u32 i = 0; i < count; ++i) {
+                                const Id index{i == 0 ? word_index
+                                                      : OpIAdd(U32[1], word_index, Const(i))};
+                                OpStore(OpAccessChain(storage_types.U32.element, ssbo_id, zero,
+                                                      index),
+                                        OpCompositeExtract(U32[1], data, i));
+                            }
+                            OpReturn();
+                        });
             OpReturn();
             OpFunctionEnd();
             return func_id;
         }
-        define_body(ssbo_member, addr, element_pointer, shift, [&](Id ssbo_pointer) {
+        define_body(ssbo_member, addr, element_pointer, shift, [&](Id ssbo_pointer, Id, Id) {
             OpStore(ssbo_pointer, data);
             OpReturn();
         });
@@ -1121,33 +1143,48 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         })) {
         return;
     }
-    for (const auto opcode : {IR::Opcode::GlobalAtomicIAdd32, IR::Opcode::GlobalAtomicUMax32}) {
+    // Global atomics routed through the search function above. IAdd and UMax were the only
+    // implemented ones; the min/max three previously threw, which takes the whole program's
+    // translation down with it (a dropped draw).
+    const auto define_atomic{[&](IR::Opcode opcode, Id EmitContext::*member, auto&& atomic) {
         if (!std::ranges::any_of(program.blocks, [opcode](const IR::Block* block) {
                 return std::ranges::any_of(block->Instructions(), [opcode](const IR::Inst& inst) {
                     return inst.GetOpcode() == opcode;
                 });
             })) {
-            continue;
+            return;
         }
         const Id function_type{TypeFunction(U32[1], U64, U32[1])};
-        const Id function{OpFunction(U32[1], spv::FunctionControlMask::MaskNone, function_type)};
-        if (opcode == IR::Opcode::GlobalAtomicIAdd32) {
-            atomic_add_global_func_u32 = function;
-        } else {
-            atomic_umax_global_func_u32 = function;
-        }
+        const Id func_id{OpFunction(U32[1], spv::FunctionControlMask::MaskNone, function_type)};
+        this->*member = func_id;
         const Id address{OpFunctionParameter(U64)};
         const Id value{OpFunctionParameter(U32[1])};
         const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
         define_body(&StorageDefinitions::U32, address, storage_types.U32.element, 2,
-                    [&](Id pointer) {
-                        OpReturnValue(opcode == IR::Opcode::GlobalAtomicIAdd32
-                                          ? OpAtomicIAdd(U32[1], pointer, scope, u32_zero_value, value)
-                                          : OpAtomicUMax(U32[1], pointer, scope, u32_zero_value, value));
-                    });
+                    [&](Id pointer, Id, Id) { OpReturnValue(atomic(pointer, scope, value)); });
         OpReturnValue(u32_zero_value);
         OpFunctionEnd();
-    }
+    }};
+    define_atomic(IR::Opcode::GlobalAtomicIAdd32, &EmitContext::atomic_add_global_func_u32,
+                  [&](Id pointer, Id scope, Id value) {
+                      return OpAtomicIAdd(U32[1], pointer, scope, u32_zero_value, value);
+                  });
+    define_atomic(IR::Opcode::GlobalAtomicUMax32, &EmitContext::atomic_umax_global_func_u32,
+                  [&](Id pointer, Id scope, Id value) {
+                      return OpAtomicUMax(U32[1], pointer, scope, u32_zero_value, value);
+                  });
+    define_atomic(IR::Opcode::GlobalAtomicUMin32, &EmitContext::atomic_umin_global_func_u32,
+                  [&](Id pointer, Id scope, Id value) {
+                      return OpAtomicUMin(U32[1], pointer, scope, u32_zero_value, value);
+                  });
+    define_atomic(IR::Opcode::GlobalAtomicSMin32, &EmitContext::atomic_smin_global_func_u32,
+                  [&](Id pointer, Id scope, Id value) {
+                      return OpAtomicSMin(U32[1], pointer, scope, u32_zero_value, value);
+                  });
+    define_atomic(IR::Opcode::GlobalAtomicSMax32, &EmitContext::atomic_smax_global_func_u32,
+                  [&](Id pointer, Id scope, Id value) {
+                      return OpAtomicSMax(U32[1], pointer, scope, u32_zero_value, value);
+                  });
     if (std::ranges::any_of(program.blocks, [](const IR::Block* block) {
             return std::ranges::any_of(block->Instructions(), [](const IR::Inst& inst) {
                 return inst.GetOpcode() == IR::Opcode::GlobalAtomicCompareExchange32;
@@ -1161,7 +1198,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         const Id value{OpFunctionParameter(U32[1])};
         const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
         define_body(&StorageDefinitions::U32, address, storage_types.U32.element, 2,
-                    [&](Id pointer) {
+                    [&](Id pointer, Id, Id) {
                         OpReturnValue(OpAtomicCompareExchange(U32[1], pointer, scope,
                                                               u32_zero_value, u32_zero_value,
                                                               value, comparator));
