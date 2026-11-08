@@ -1170,6 +1170,7 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         }
         return;
     }
+    bool draw_manager_method = false;
     if (!execution_mask[method]) {
         // Nothing would change on the back: CallMethod and ConsumeSinkImpl skip same-value state
         // writes, and the shadow RAM (tracked by default) holds the value already.
@@ -1213,11 +1214,19 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
                 fs.regs[MAXWELL3D_REG_INDEX(const_buffer.offset)] += sizeof(u32);
             } else if (!FrontHandledOutsideDrawManager(method)) {
                 fs.draw_pending = true;
+                draw_manager_method = true;
             }
             break;
         }
     }
     split.Method(this, method, argument, from_macro || is_last_call, nullptr);
+    if (draw_manager_method) {
+        // The draw manager can issue a draw from this write (and a macro end flushes the
+        // deferred instance draws). Draws write guest memory through shader stores, stream out
+        // and reports, so the guest-write watermark has to cover where they run: noted after
+        // the method's entry, so a read past it waits for the draw.
+        split.NoteMemoryWriter();
+    }
     if (method == MAXWELL3D_REG_INDEX(report_semaphore.query)) {
         split.NoteSemaphoreWrite(
             (GPUVAddr{fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_high)]} << 32) |
@@ -1271,6 +1280,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
         return fs.control == Regs::ShadowRamControl::Track ||
                fs.control == Regs::ShadowRamControl::TrackWithFilter;
     };
+    bool draw_manager_method = false;
     if (method >= cb_data && method < cb_data + 16) {
         fs.regs[MAXWELL3D_REG_INDEX(const_buffer.offset)] += amount * sizeof(u32);
     } else if (method == MAXWELL3D_REG_INDEX(inline_data)) {
@@ -1287,6 +1297,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
             fs.regs[method] = last;
         }
         fs.draw_pending = true;
+        draw_manager_method = true;
     } else {
         // CallMethod for each word, macro uploads among them (load_mme.instruction). A word may
         // change the shadow RAM mode for the next (a run of SET_SHADOW_RAM_CONTROL writes).
@@ -1332,12 +1343,18 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
             default:
                 if (!FrontHandledOutsideDrawManager(method)) {
                     fs.draw_pending = true;
+                    draw_manager_method = true;
                 }
                 break;
             }
         }
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
+    if (draw_manager_method) {
+        // As in FrontWrite: draws the draw manager issues from these words can write guest
+        // memory, and the note has to sit after the batch's entries.
+        split.NoteMemoryWriter();
+    }
     if (method == MAXWELL3D_REG_INDEX(report_semaphore.query)) {
         split.NoteSemaphoreWrite(
             (GPUVAddr{fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_high)]} << 32) |
@@ -1465,6 +1482,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     if (fs.draw_pending) {
         fs.draw_pending = false;
         split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); });
+        // FinishFrontMacro runs DrawDeferred: the deferred instance draws issue at this entry
+        // and can write guest memory (see FrontWrite's note).
+        split.NoteMemoryWriter();
     }
     if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
         FrontVerify(split, fs);
@@ -1673,9 +1693,6 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     // EDEN_NX2_MME_LIGHT_DRAIN=1, PR #161's lighter path: wait for the writers and semaphores
     // that can produce this payload, and drain/flush only when the pages hold GPU-written data.
     static const bool light_drain = std::getenv("EDEN_NX2_MME_LIGHT_DRAIN") != nullptr;
-    if (!light_drain) {
-        split.Drain(VideoCommon::DrainSite::MacroDmaRead);
-    }
     // EXPERIMENT (not for nx2): EDEN_NX2_DMA_WAIT_WRITERS=1 waits only for the queued work that
     // writes guest memory (compute, copies, inline uploads, reports, semaphores) when no page read
     // was written by GPU shaders or copies; =3 only for the queued inline uploads, reports and
@@ -1683,6 +1700,142 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     // =2, =4 and =6 also drain, read again and log differences.
     const int wait_writers =
         VideoCore::Nx2Debug::g_dma_wait_writers.load(std::memory_order_relaxed);
+    // Words into the macro's parameters or data RAM (and the macro-read cache and the
+    // command-page diagnostic), from `data`.
+    const auto serve = [&](const u32* data) {
+        if (VideoCommon::Nx2Profile::Enabled()) {
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);
+        }
+        MacroReadEntry* fallthrough_entry = macro_read_cache_on && words <= 256
+                                                ? &macro_read_cache[(source >> 7) & 31]
+                                                : nullptr;
+        if (fallthrough_entry) {
+            fallthrough_entry->source = source;
+            fallthrough_entry->words = words;
+            fallthrough_entry->captured_at = split.WritePositionNow();
+        }
+        u32 changed{};
+        for (u32 i = 0; i < words; ++i) {
+            const u32 word = data[i];
+            if (fallthrough_entry) {
+                fallthrough_entry->data[i] = word;
+            }
+            if (method == 0x158) {
+                fs.parameters.push_back(word);
+            } else if (ram + i < native_data_ram.size()) {
+                native_data_ram[ram + i] = word;
+            }
+            if (!diag_before.empty() && diag_before[i] != word) {
+                ++changed;
+            }
+        }
+        if (Tegra::Nx2CmdPageDiag::g_enabled) {
+            bool diag_gpu_written = false;
+            for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes;
+                 page += 0x1000) {
+                const auto device = memory_manager.GpuToCpuAddress(page);
+                diag_gpu_written |= device && Tegra::Nx2IsGpuWritten(*device);
+            }
+            Tegra::Nx2CmdPageDiag::RecordDmaRead(source, words, changed, diag_gpu_written);
+        }
+    };
+    const auto read_and_serve = [&] {
+        thread_local std::vector<u32> collected;
+        collected.resize(words);
+        for (u32 i = 0; i < words; ++i) {
+            collected[i] = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
+        }
+        serve(collected.data());
+    };
+    if (!light_drain && wait_writers == 0 && diag_before.empty() &&
+        !VideoCommon::QueryDma::TraceEnabled()) {
+        // The read's whole freshness story: every dispatched entry that can write guest memory
+        // has run (the split's writer watermark covers compute and copy dispatches, uploads,
+        // reports and the draws a draw-manager method can issue), no page of the range is
+        // GPU-written (nothing the GPU wrote there is still in flight, so guest memory holds
+        // the landed bytes) and no report to it is still landing. Then guest memory holds what
+        // the round trip below reads, and a culling dispatch's reads share its one wait instead
+        // of each draining the whole ring (~550 round trips a frame were the measured wall).
+        static bool fast_broken{};
+        // EDEN_NX2_MACRO_FAST=0: every read pays the round trip (A/B).
+        static const bool macro_fast = [] {
+            const char* const v = std::getenv("EDEN_NX2_MACRO_FAST");
+            return v == nullptr || v[0] != '0';
+        }();
+        bool eligible = macro_fast && !fast_broken && split.GuestWritesConsumed();
+        for (GPUVAddr page = source & ~GPUVAddr{0xfff}; eligible && page < source + read_bytes;
+             page += 0x1000) {
+            const auto device = memory_manager.GpuToCpuAddress(page);
+            const u64 begin = (std::max)(page, source);
+            const u64 end = (std::min)(page + 0x1000, source + read_bytes);
+            eligible = device && !Tegra::Nx2IsGpuWritten(*device) &&
+                       Tegra::Nx2AsyncReportsSettled(*device + (begin - page), end - begin);
+        }
+        // One back round trip for the reads that wait: land the range (a download where the
+        // buffer cache holds GPU data) and its reports in a single deferred call, instead of a
+        // full drain plus two deferred calls each draining again. The dirty check runs on the
+        // back, where the caches live (as dma_pusher defers IsMemoryDirty there).
+        const auto land = [&] {
+            split.Run(
+                [this, source, read_bytes] {
+                    if (memory_manager.IsMemoryDirty(source, read_bytes,
+                                                     VideoCommon::CacheType::BufferCache)) {
+                        memory_manager.FlushRegion(source, read_bytes,
+                                                   VideoCommon::CacheType::BufferCache);
+                    }
+                    VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, source,
+                                                        read_bytes);
+                },
+                VideoCommon::DrainSite::MacroDmaRead);
+        };
+        thread_local std::vector<u32> fast_words;
+        if (eligible) {
+            // A bounded audit while the shortcut beds in: the first reads and then a sample run
+            // the round trip too and compare. Any difference serves the landed words and turns
+            // the shortcut off for the rest of the run (EDEN_NX2_GUESTGEN's audit shape).
+            static u64 reads{};
+            static u64 checks{};
+            static u64 differences{};
+            fast_words.resize(words);
+            memory_manager.ReadWordsUnsafe(source, fast_words.data(), words);
+            const u64 read = ++reads;
+            if (read > 4096 && (read & 63) != 0) {
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadNoWait, 1);
+                serve(fast_words.data());
+                return;
+            }
+            land();
+            thread_local std::vector<u32> exact;
+            exact.resize(words);
+            for (u32 i = 0; i < words; ++i) {
+                exact[i] = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
+            }
+            ++checks;
+            if (std::memcmp(fast_words.data(), exact.data(), read_bytes) != 0) {
+                if (differences++ < 16) {
+                    LOG_WARNING(HW_GPU,
+                                "Macro DMA no-wait check: macro {:#x} read of {} words at "
+                                "{:#x} differs from the landed read",
+                                macro, words, source);
+                }
+                fast_broken = true;
+                fast_words = std::move(exact);
+            }
+            if ((checks & 0xfff) == 0) {
+                LOG_INFO(HW_GPU, "Macro DMA no-wait audit: {} checks, {} differed ({} fast)",
+                         checks, differences, reads);
+            }
+            serve(fast_words.data());
+            return;
+        }
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadWaits, 1);
+        land();
+        read_and_serve();
+        return;
+    }
+    if (!light_drain) {
+        split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+    }
     if (wait_writers != 0 && diag_before.empty()) {
         const bool by_address = wait_writers >= 3;
         if (!by_address) {
@@ -1785,9 +1938,6 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             break;
         }
     }
-    if (VideoCommon::Nx2Profile::Enabled()) {
-        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);
-    }
     if (!light_drain || gpu_written) {
         if (light_drain) {
             split.Drain(VideoCommon::DrainSite::MacroDmaRead);
@@ -1806,37 +1956,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, source, read_bytes);
         },
         VideoCommon::DrainSite::MacroDmaFlush);
-    u32 changed{};
-    MacroReadEntry* fallthrough_entry = macro_read_cache_on && words <= 256
-                                            ? &macro_read_cache[(source >> 7) & 31]
-                                            : nullptr;
-    if (fallthrough_entry) {
-        fallthrough_entry->source = source;
-        fallthrough_entry->words = words;
-        fallthrough_entry->captured_at = split.WritePositionNow();
-    }
-    for (u32 i = 0; i < words; ++i) {
-        const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
-        if (fallthrough_entry) {
-            fallthrough_entry->data[i] = word;
-        }
-        if (method == 0x158) {
-            fs.parameters.push_back(word);
-        } else if (ram + i < native_data_ram.size()) {
-            native_data_ram[ram + i] = word;
-        }
-        if (!diag_before.empty() && diag_before[i] != word) {
-            ++changed;
-        }
-    }
-    if (Tegra::Nx2CmdPageDiag::g_enabled) {
-        bool diag_gpu_written = false;
-        for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes; page += 0x1000) {
-            const auto device = memory_manager.GpuToCpuAddress(page);
-            diag_gpu_written |= device && Tegra::Nx2IsGpuWritten(*device);
-        }
-        Tegra::Nx2CmdPageDiag::RecordDmaRead(source, words, changed, diag_gpu_written);
-    }
+    read_and_serve();
 }
 
 void Maxwell3D::FrontVerify(VideoCommon::GpuSplit& split, FrontState& fs) {

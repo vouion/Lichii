@@ -169,12 +169,27 @@ public:
     /// Returns whether any of it was still queued.
     bool WaitForWriters(DrainSite site = DrainSite::ListWriters);
     /// Other work that writes guest memory on the back was just sent: inline uploads, reports,
-    /// puller methods (semaphores).
+    /// puller methods (semaphores), and draws (they can write through shader stores and stream
+    /// out). Call it after the work's ring entries are sent: the note is its position.
     void NoteMemoryWriter() {
         last_memory_writer_position = write_position;
     }
     /// Waits until the back executed every NoteWriter and NoteMemoryWriter work sent so far.
     bool WaitForMemoryWriters();
+    /// Whether the back has run every dispatched entry that can write guest memory (the
+    /// NoteWriter and NoteMemoryWriter work). Together with the page-written flags (clear only
+    /// once a page's GPU bytes landed, nx2.h) and Tegra::Nx2AsyncReportsSettled for its reports,
+    /// this is the whole freshness story of a guest memory read: with it true and no page of the
+    /// range GPU-written, the words in guest memory are what a full Drain would return. A note
+    /// is taken after its work's ring entries, so `consumed` past it means they ran.
+    [[nodiscard]] bool GuestWritesConsumed() noexcept {
+        const u64 target = (std::max)(last_writer_position, last_memory_writer_position);
+        if (consumed_cache >= target) {
+            return true;
+        }
+        consumed_cache = consumed.load(std::memory_order_acquire);
+        return consumed_cache >= target;
+    }
     /// Work that writes the device range [begin, begin + size) was just sent (an inline upload, a
     /// report, a semaphore release). size ~0 means an unknown range.
     void NoteMemoryWrite(u64 begin, u64 size, const char* what = "unknown") {

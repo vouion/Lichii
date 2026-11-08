@@ -332,10 +332,14 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
-    for (u32 spins = 0; spins < 256; ++spins) {
+    // The back usually answers within the handoff: spin well past the sleep round trip before
+    // paying it (256 pauses was less than the measured wake latency, so every list writer and
+    // acquire wait slept anyway).
+    for (u32 spins = 0; spins < 16384; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache >= target) {
             wait_target.store(~u64{0}, std::memory_order_relaxed);
+            publish_every = 8;
             Nx2Profile::AddDrain(site, start);
             return true;
         }
@@ -352,6 +356,7 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     }
     front_waiting.store(false, std::memory_order_relaxed);
     wait_target.store(~u64{0}, std::memory_order_relaxed);
+    publish_every = 8;
     Nx2Profile::AddDrain(site, start);
     return true;
 }
@@ -527,15 +532,27 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
 #endif
     u64 read_position = 0;
+    // When this thread last ran ring work: the front usually sends more within microseconds of
+    // it (its drains hand over one entry at a time), so keep spinning that long instead of
+    // sleeping. Every drain waits on this thread to notice, and the measured ping-pong waits
+    // (27-29 µs each, the front's whole wall) were the condvar wake, not queued work.
+    constexpr auto back_spin_window = std::chrono::microseconds{150};
+    auto last_work = std::chrono::steady_clock::now();
     while (!stop_token.stop_requested()) {
         Nx2Profile::Report("GPU back thread");
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
-            // The front usually sends more within microseconds: spin briefly before sleeping.
-            for (u32 spins = 0; spins < 512 && available == read_position &&
-                                !hook_requested.load(std::memory_order_relaxed);
+            // Spin while work is arriving at drain cadence; a longer gap sleeps (the window is
+            // since the last work, so one busy core is bounded to bursts of it).
+            for (u32 spins = 0; available == read_position &&
+                                !hook_requested.load(std::memory_order_relaxed) &&
+                                !stop_token.stop_requested();
                  ++spins) {
+                if ((spins & 63) == 0 &&
+                    std::chrono::steady_clock::now() - last_work >= back_spin_window) {
+                    break;
+                }
                 Pause();
                 available = published.load(std::memory_order_acquire);
             }
@@ -580,6 +597,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 NotifyFront();
             }
         }
+        last_work = std::chrono::steady_clock::now();
         consumed.store(read_position, std::memory_order_seq_cst);
         NotifyFront();
     }
