@@ -2909,27 +2909,34 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
     }
 
     u32 size = [&]() {
+        // A pointer read from a table in memory is the base of an object pool, read anywhere in
+        // it (Ocarina of Time's grass instances lie 12-18 MiB past theirs; its fragment SH light
+        // probes read SH records ~104-122 MiB past it). Bind the pool's real length - the end of
+        // its contiguous mapping, which the MaxContinuousRange below trims to - with no
+        // per-stage cap: every read past a capped binding returns zero, which starved the probes'
+        // blue sky-ambient term and washed bright scenes white. The contiguous kind-map size is
+        // not the pool length either (the probe pool's kind range ends 64 MiB in while its
+        // mapping runs ~150 MiB), so it is not a bound here. The 8 MiB cap before those made the
+        // grass reads return 0 and culled every blade. Written pools keep the tight cap: a write
+        // marks the whole binding GPU-modified.
+        // EDEN_NX2_TABLE_POINTER_MIB truncates read-only table pointers again to reproduce the
+        // wash (64 restores the old arm); unset binds the whole mapped pool.
+        if (table_pointer && !is_written) {
+            static const u64 truncate_bytes = [] -> u64 {
+                const char* const value = std::getenv("EDEN_NX2_TABLE_POINTER_MIB");
+                const u64 mib = value == nullptr ? 0 : std::strtoull(value, nullptr, 10);
+                return mib << 20;
+            }();
+            u64 bound = gpu_memory->IsWithinGPUAddressRange(gpu_addr)
+                            ? gpu_memory->GetAddressSpaceSize() - gpu_addr
+                            : 0;
+            if (truncate_bytes != 0) {
+                bound = (std::min)(bound, truncate_bytes);
+            }
+            return static_cast<u32>((std::min<u64>)(bound, (std::numeric_limits<u32>::max)()));
+        }
         const u32 memory_layout_size =
             static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
-        // A pointer read from a table in memory is the base of an object pool, read anywhere in
-        // it (Ocarina of Time's grass instances lie 12-18 MiB past theirs): bound to the end of
-        // its mapping, up to 64 MiB (256 MiB for compute: its fog light probes, SH records
-        // ~104-122 MiB past their pointer, all read 0 at 64 MiB and the volumetric fog lost its
-        // sky ambient). The 8 MiB cap made the grass reads return 0 and culled every blade.
-        // Written pools keep the cap: a write marks the whole binding GPU-modified.
-        // EDEN_NX2_TABLE_POINTER_MIB overrides the compute cap (64 restores the old one).
-        if (table_pointer && !is_written) {
-            static const u32 compute_cap = [] {
-                const char* const value = std::getenv("EDEN_NX2_TABLE_POINTER_MIB");
-                const u64 mib = value == nullptr ? 256 : std::strtoull(value, nullptr, 10);
-                return static_cast<u32>((mib == 0 ? 256 : mib) << 20);
-            }();
-            // The raised cap serves BOTH stages: OoT's fragment probe reads resolve to the same
-            // SH record pools as the compute ones (104-122 MiB past the pointer), and the 64 MiB
-            // graphics cap alone kept the green wash alive (the probe SSBOs' reads past 64 MiB
-            // returned zero where the sky/blue term lives). Writes keep the tight cap above.
-            return (std::min)(memory_layout_size, compute_cap);
-        }
         // A native (Switch 2) compute program's pointer is bare: the word after it is another
         // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it as
         // one bound Fortune's Weave's DLSS input features to 266 bytes and dropped the rest.
@@ -2976,10 +2983,18 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         binding_size = aligned_size;
     }
     if constexpr (requires { runtime.GetMaxStorageBufferRange(); }) {
-        // A read-only pool's 256 MiB compute cap is above the 128 MiB every device guarantees.
-        // Only those are clamped, so no write is cut off.
-        if (table_pointer && !is_written) {
-            binding_size = (std::min)(binding_size, runtime.GetMaxStorageBufferRange());
+        // Never silently clamp a read-only table pointer: clamped reads return zero, which is
+        // exactly the white-wash failure this pool binding exists to avoid. If a device cannot
+        // bind the pool in one range, the binding needs splitting; say so loudly instead of
+        // rendering wrong without a trace.
+        if (table_pointer && !is_written && binding_size > runtime.GetMaxStorageBufferRange()) {
+            static std::atomic<bool> warned{};
+            if (!warned.exchange(true, std::memory_order_relaxed)) {
+                LOG_WARNING(HW_GPU,
+                            "Read-only table pointer binding {:#x} bytes exceeds this device's "
+                            "max storage buffer range {:#x}; binding the pool's full length anyway",
+                            binding_size, runtime.GetMaxStorageBufferRange());
+            }
         }
     }
     const Binding binding{

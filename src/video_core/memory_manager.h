@@ -169,6 +169,11 @@ public:
         return gpu_addr < address_space_size;
     }
 
+    /// Size of the GPU virtual address space a binding range has to fit in.
+    [[nodiscard]] u64 GetAddressSpaceSize() const noexcept {
+        return address_space_size;
+    }
+
     PTEKind GetPageKind(GPUVAddr gpu_addr) const;
 
     size_t GetMemoryLayoutSize(GPUVAddr gpu_addr,
