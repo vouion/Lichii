@@ -1019,17 +1019,26 @@ void BufferCache<P>::PopAsyncBuffers() {
             device_memory.WriteBlockUnsafe(start, &read_mapped_memory[start - device_addr],
                                            end - start);
             gpu_modified_ranges.Subtract(start, end - start);
-            // The GPU's data has landed in guest memory: the page is no longer GPU-written, so
-            // the culling readback's fast paths (LIGHT_DRAIN / DMA_WAIT_WRITERS / SEM_FAST) can
-            // use it instead of degenerating to a full drain (the sticky-bit bug).
-            // EDEN_NX2_CLEAR_GPU_WRITTEN=0 keeps the sticky mark (A/B for the washed-out
-            // bright-scene bug): the clear is per page while this range can be partial, so a page
-            // with a newer queued GPU write still in flight loses its mark and the fast paths read
-            // it unflushed.
-            static const bool clear_gpu_written =
-                std::getenv("EDEN_NX2_CLEAR_GPU_WRITTEN") != nullptr;
-            if (clear_gpu_written) {
-                Tegra::Nx2ClearGpuWritten(start, end - start);
+            // The GPU's data has landed in guest memory: drop the pages' GPU-written marks so the
+            // culling readback's fast paths (LIGHT_DRAIN / DMA_WAIT_WRITERS / SEM_FAST) can use
+            // them instead of degenerating to a full drain (the sticky-bit bug). Only a page whose
+            // queued GPU writes have all landed may lose its mark: the mark is per 4 KiB page
+            // while this range can be partial, and clearing a page that still holds an in-flight
+            // write lets the fast paths read it unflushed (the washed-out bright-scene bug). The
+            // interior pages of the landed range were just subtracted from gpu_modified_ranges and
+            // cannot hold a pending write; an edge page can hold one outside the range. This runs
+            // under the buffer cache mutex, so no write can slip in between the check and the
+            // clear.
+            constexpr u64 page_size = u64{1} << Tegra::Nx2WrittenPageBits;
+            const u64 first_page = start / page_size;
+            const u64 last_page = (end - 1) / page_size;
+            for (u64 page = first_page; page <= last_page; ++page) {
+                const DAddr page_addr = page * page_size;
+                const bool partial = start > page_addr || end < page_addr + page_size;
+                if (partial && gpu_modified_ranges.Intersects(page_addr, page_size)) {
+                    continue;
+                }
+                Tegra::Nx2ClearGpuWrittenPage(page);
             }
         });
     }
