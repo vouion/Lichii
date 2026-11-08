@@ -1398,12 +1398,15 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             // EDEN_NX2_UBOREUSE=0 turns it off. The generation key may skip the copy and the
             // compare outright, but only where every writer that can reach these bytes bumps
             // guest_write_generations: native program banks are written past the tracker once in
-            // a while (see the mark above), and a GPU-written range can hold a deferred write.
+            // a while (see the mark above), a GPU-written range can hold a deferred write, and a
+            // texture-cache download lands in guest RAM without going through the buffer cache at
+            // all. That hole can leave a UBO stale, so the skip is off unless EDEN_NX2_GUESTGEN=1
+            // opts in (correctness first: the copy+compare runs and the image stays right).
             if (VideoCommon::UniformStreamReuseEnabled()) {
                 const bool native_bank =
                     gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
                     (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000;
-                const bool gen_skip_ok = !native_bank &&
+                const bool gen_skip_ok = VideoCommon::GuestGenSkipEnabled() && !native_bank &&
                                          !memory_tracker.IsRegionGpuModified(device_addr, size) &&
                                          !IsRegionGpuModified(device_addr, size);
                 streamed = VideoCommon::BindSmallUniformReusing(
@@ -2439,11 +2442,13 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
     }
     // Nothing wrote the range since this walk's snapshot, so the walk cannot find a dirty word:
     // skip it. Unlike EDEN_NX2_UPLOAD_SKIP's clean words, the generations cannot lose an update.
-    if (!Nx2Perf::Verify() &&
+    // Off unless EDEN_NX2_GUESTGEN=1: the generations miss writers that bypass the buffer cache
+    // (a texture-cache download lands in guest RAM untracked), which could skip a needed upload.
+    if (VideoCommon::GuestGenSkipEnabled() && !Nx2Perf::Verify() &&
         sync_gen_snapshots.Unchanged(guest_write_generations, device_addr, size)) {
         return true;
     }
-    if (!Nx2Perf::Verify()) {
+    if (VideoCommon::GuestGenSkipEnabled() && !Nx2Perf::Verify()) {
         sync_gen_snapshots.Store(guest_write_generations, device_addr, size);
     }
     // An upload over a clean word of the tracker (word_manager.h) finds and changes nothing:

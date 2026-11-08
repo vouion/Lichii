@@ -41,12 +41,18 @@ concept StreamUniformReusable = requires(R& runtime, u32 size) {
     return enabled;
 }
 
-/// EDEN_NX2_GUESTGEN=0 turns the generation-keyed skips off (every bind re-reads guest memory
-/// and re-compares, as before) while keeping the reuse itself.
+/// EDEN_NX2_GUESTGEN=1 opts into trusting the guest-write generations to skip a small uniform's
+/// copy+compare (and a buffer's upload walk). Off by default: the generations are bumped only by
+/// the buffer cache's own entry points, so a writer that reaches guest RAM without going through
+/// them (a texture-cache download lands via MemoryManager::WriteBlockUnsafe and bumps nothing) can
+/// change bytes the table still calls unchanged, and the skip then serves a stale uniform - wrong
+/// exposure/lighting, a washed-out image. Correctness first: copy and compare unless this is
+/// explicitly turned on. The reuse's own read+memcmp path is unaffected and stays on; this only
+/// controls skipping that read on a generation proof. Callers pass it as `gen_skip_ok`.
 [[nodiscard]] inline bool GuestGenSkipEnabled() noexcept {
     static const bool enabled = [] {
         const char* const value = std::getenv("EDEN_NX2_GUESTGEN");
-        return value == nullptr || value[0] != '0';
+        return value != nullptr && value[0] == '1';
     }();
     return enabled;
 }
@@ -159,7 +165,7 @@ template <class Runtime, class DeviceMemory, class GuestGen>
     UniformStreamSkipStats& stats = UniformStreamSkipCounters();
 
     const bool gen_trusted =
-        gen_skip_ok && GuestGenSkipEnabled() && !UniformStreamSkipBroken() && slot.size == size &&
+        gen_skip_ok && !UniformStreamSkipBroken() && slot.size == size &&
         slot.addr == device_addr && guest_gen.Unchanged(device_addr, size, slot.gens, slot.gen_pages);
     bool same_bytes = false;
     bool have_scratch = false;
@@ -189,7 +195,7 @@ template <class Runtime, class DeviceMemory, class GuestGen>
     } else {
         ++stats.skips;
     }
-    if (gen_skip_ok && GuestGenSkipEnabled()) {
+    if (gen_skip_ok) {
         // The bytes at `scratch` (or the proven-unchanged slot bytes) are the guest's now.
         slot.addr = device_addr;
         slot.gen_pages = guest_gen.Snapshot(device_addr, size, slot.gens);
