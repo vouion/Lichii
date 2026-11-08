@@ -786,35 +786,11 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             last_descriptor_payload.assign(entries, entries + num_descriptor_entries);
         }
     }
-    // A pipeline that is not built yet waits inside the command buffer and may fail there,
-    // dropping the commands the memo would already claim: only a certain build may memoise.
-    const bool memo_ready = IsBuilt() && pipeline && !build->Failed();
-    const VkShaderStageFlags push_stages =
-        IsMeshPipeline() ? VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_TASK_BIT_EXT |
-                               VK_SHADER_STAGE_MESH_BIT_EXT
-                         : VK_SHADER_STAGE_ALL_GRAPHICS;
-    const auto& rescaling_words = rescaling.Data();
-    const bool push_rescaling_words =
-        !memo_ready ||
-        scheduler.UpdatePushConstants(*pipeline_layout, push_stages,
-                                      RESCALING_LAYOUT_WORDS_OFFSET, rescaling_words.data(),
-                                      sizeof(rescaling_words));
-    const bool push_render_area =
-        render_area.uses_render_area &&
-        (!memo_ready ||
-         scheduler.UpdatePushConstants(*pipeline_layout, push_stages, RENDERAREA_LAYOUT_OFFSET,
-                                       render_area.words.data(), sizeof(render_area.words)));
-    const bool set_descriptor_offsets =
-        descriptor_set_layout && uses_descriptor_buffer &&
-        (!memo_ready || scheduler.UpdateDescriptorBufferOffsets(*pipeline_layout,
-                                                                descriptor_buffer_chunk,
-                                                                descriptor_buffer_offset));
     scheduler.Record([this, descriptor_data, bind_pipeline, update_descriptors,
                       descriptor_buffer_offset, descriptor_buffer_chunk, bind_descriptor_buffer,
                       rescaling_data = rescaling.Data(), is_rescaling, update_rescaling,
-                      render_area_data = render_area.words, push_stages,
-                      push_rescaling_words, push_render_area,
-                      set_descriptor_offsets](vk::CommandBuffer cmdbuf) {
+                      uses_render_area = render_area.uses_render_area,
+                      render_area_data = render_area.words](vk::CommandBuffer cmdbuf) {
         if (bind_descriptor_buffer) {
             const VkDescriptorBufferBindingInfoEXT binding_info{
                 descriptor_buffer_ring.BindingInfo(descriptor_buffer_chunk)};
@@ -827,10 +803,12 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             }
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
         }
-        if (push_rescaling_words) {
-            cmdbuf.PushConstants(*pipeline_layout, push_stages, RESCALING_LAYOUT_WORDS_OFFSET,
-                                 sizeof(rescaling_data), rescaling_data.data());
-        }
+        const VkShaderStageFlags push_stages =
+            IsMeshPipeline() ? VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_TASK_BIT_EXT |
+                                   VK_SHADER_STAGE_MESH_BIT_EXT
+                             : VK_SHADER_STAGE_ALL_GRAPHICS;
+        cmdbuf.PushConstants(*pipeline_layout, push_stages, RESCALING_LAYOUT_WORDS_OFFSET,
+                             sizeof(rescaling_data), rescaling_data.data());
         if (update_rescaling) {
             const f32 config_down_factor{Settings::values.resolution_info.down_factor};
             const f32 scale_down_factor{is_rescaling ? config_down_factor : 1.0f};
@@ -838,7 +816,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                  RESCALING_LAYOUT_DOWN_FACTOR_OFFSET, sizeof(scale_down_factor),
                                  &scale_down_factor);
         }
-        if (push_render_area) {
+        if (uses_render_area) {
             cmdbuf.PushConstants(*pipeline_layout, push_stages, RENDERAREA_LAYOUT_OFFSET,
                                  sizeof(render_area_data), &render_area_data);
         }
@@ -846,12 +824,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             return;
         }
         if (uses_descriptor_buffer) {
-            if (set_descriptor_offsets) {
-                const u32 buffer_index{};
-                cmdbuf.SetDescriptorBufferOffsetsEXT(VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                     *pipeline_layout, 0, buffer_index,
-                                                     descriptor_buffer_offset);
-            }
+            const u32 buffer_index{};
+            cmdbuf.SetDescriptorBufferOffsetsEXT(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline_layout,
+                                                 0, buffer_index, descriptor_buffer_offset);
         } else if (uses_push_descriptor) {
             cmdbuf.PushDescriptorSetWithTemplateKHR(*descriptor_update_template, *pipeline_layout,
                                                     0, descriptor_data);

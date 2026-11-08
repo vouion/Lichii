@@ -267,7 +267,6 @@ public:
         const bool wait_on_last =
             driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE;
 
-        runtime.NoteSyncCopy();
         ApplyBanksWideOp<true>(pending_sync, [&](SamplesQueryBank* bank, size_t start,
                                                  size_t amount) {
             size_t bank_id = bank->GetIndex();
@@ -1411,11 +1410,6 @@ struct QueryCacheRuntimeImpl {
     bool hcr_is_set;
     bool is_hcr_running;
 
-    // Sync group barrier state: the read barrier is armed once per group and recorded by the
-    // first query copy, the write barrier only when a copy was recorded.
-    bool sync_pre_armed{};
-    bool sync_pre_recorded{};
-
     // maxwell3d
     Maxwell3D* maxwell3d;
 };
@@ -1662,38 +1656,13 @@ VideoCommon::StreamerInterface* QueryCacheRuntime::GetStreamerInterface(QueryTyp
     }
 }
 
-void QueryCacheRuntime::BeginSyncBarriers() {
-    // Armed only: the first copy of this sync group records the read barrier (NoteSyncCopy), so a
-    // group whose streamers copy nothing ends no render pass and drains nothing.
-    impl->sync_pre_armed = true;
-    impl->sync_pre_recorded = false;
-}
-
-void QueryCacheRuntime::NoteSyncCopy() {
-    if (!impl->sync_pre_armed) {
-        return;
-    }
-    impl->sync_pre_armed = false;
-    impl->sync_pre_recorded = true;
+void QueryCacheRuntime::Barriers(bool is_prebarrier) {
     static constexpr VkMemoryBarrier READ_BARRIER{
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .pNext = nullptr,
         .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
         .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
     };
-    impl->scheduler.RequestOutsideRenderPassOperationContext();
-    impl->scheduler.Record([](vk::CommandBuffer cmdbuf) {
-        cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
-                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, READ_BARRIER);
-    });
-}
-
-void QueryCacheRuntime::EndSyncBarriers() {
-    impl->sync_pre_armed = false;
-    if (!impl->sync_pre_recorded) {
-        return;
-    }
-    impl->sync_pre_recorded = false;
     static constexpr VkMemoryBarrier WRITE_BARRIER{
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -1701,10 +1670,17 @@ void QueryCacheRuntime::EndSyncBarriers() {
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
     };
     impl->scheduler.RequestOutsideRenderPassOperationContext();
-    impl->scheduler.Record([](vk::CommandBuffer cmdbuf) {
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER_HOST, 0, WRITE_BARRIER);
-    });
+    if (is_prebarrier) {
+        impl->scheduler.Record([](vk::CommandBuffer cmdbuf) {
+            cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, READ_BARRIER);
+        });
+    } else {
+        impl->scheduler.Record([](vk::CommandBuffer cmdbuf) {
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER_HOST, 0, WRITE_BARRIER);
+        });
+    }
 }
 
 template <typename SyncValuesType>
@@ -1794,7 +1770,6 @@ void QueryCacheRuntime::SyncValues(std::span<SyncValuesType> values, VkBuffer ba
         src_buffer = base_src_buffer;
     }
 
-    NoteSyncCopy();
     impl->scheduler.RequestOutsideRenderPassOperationContext();
     impl->scheduler.Record([src_buffer, dst_buffers = std::move(impl->buffers_to_upload_to), vk_copies = std::move(impl->copies_setup)](vk::CommandBuffer cmdbuf) {
         size_t size = dst_buffers.size();

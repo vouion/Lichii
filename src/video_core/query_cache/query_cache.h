@@ -433,12 +433,10 @@ void QueryCacheBase<Traits>::NotifyWFI() {
         return;
     }
 
-    // The read barrier is armed here and recorded by the first copy of the group, so a group
-    // whose streamers copy nothing ends no render pass and drains nothing.
-    impl->runtime.BeginSyncBarriers();
     impl->ForEachStreamer([](StreamerInterface* streamer) { streamer->PresyncWrites(); });
+    impl->runtime.Barriers(true);
     impl->ForEachStreamer([](StreamerInterface* streamer) { streamer->SyncWrites(); });
-    impl->runtime.EndSyncBarriers();
+    impl->runtime.Barriers(false);
 }
 
 template <typename Traits>

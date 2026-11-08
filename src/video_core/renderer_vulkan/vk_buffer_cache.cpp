@@ -517,13 +517,7 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     // Measuring a popular game, this number never exceeds the specified size once data is warmed up
     boost::container::small_vector<VkBufferCopy, 8> vk_copies(copies.size());
     std::ranges::transform(copies, vk_copies.begin(), MakeBufferCopy);
-    // Any staging-pool upload source may run in the upload command buffer: it is filled by the
-    // CPU before this copy is recorded, and that command buffer is submitted ahead of this one,
-    // so the data lands before any draw that reads it. The caller only asks for it when the
-    // destination regions are unused by pending work (CanReorderUpload); the stream buffer is
-    // simply the common case, not a requirement, and the >8 MiB uploads that fall out of it
-    // ended the render pass for nothing.
-    if (can_reorder_upload) {
+    if (src_buffer == staging_pool.StreamBuf() && can_reorder_upload) {
         scheduler.RecordWithUploadBuffer([src_buffer, dst_buffer, vk_copies](
                                              vk::CommandBuffer, vk::CommandBuffer upload_cmdbuf) {
             upload_cmdbuf.CopyBuffer(src_buffer, dst_buffer, vk_copies);

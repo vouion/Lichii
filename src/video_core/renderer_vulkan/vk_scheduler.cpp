@@ -300,8 +300,7 @@ void Scheduler::DispatchWork() {
 }
 
 void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
-                                    const VkClearValue* clear_values, u32 clear_value_count,
-                                    bool load_variant_only) {
+                                    const VkClearValue* clear_values, u32 clear_value_count) {
     if (VideoCommon::Nx2Profile::Enabled()) {
         g_profile_renderpasses.fetch_add(1, std::memory_order_relaxed);
     }
@@ -309,10 +308,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     const VkExtent2D render_area = framebuffer->RenderArea();
     state.renderpass = renderpass;
     state.framebuffer = framebuffer_handle;
-    state.framebuffer_ptr = framebuffer;
     state.render_area = render_area;
-    state.renderpass_load_variant =
-        load_variant_only && renderpass != framebuffer->RenderPass();
 
     if (GPU::Logging::IsActive() && Settings::values.gpu_log_vulkan_calls.GetValue()) {
         const std::string render_pass_info =
@@ -374,10 +370,7 @@ void Scheduler::RealizeDeferredClear() {
     const VkRenderPass renderpass = dc.framebuffer->RenderPassVariant(
         dc.color_clear_mask, dc.depth_stencil, color_discard_mask, depth_stencil_discard);
     EndRenderPass();
-    // A clear-only variant may hold the draws that follow it when it changes no storeOp: its
-    // loadOps already ran, so those draws continue instead of re-LOADing the cleared surface.
-    BeginRenderPassImpl(dc.framebuffer, renderpass, clear_values.data(), count,
-                        color_discard_mask == 0 && !depth_stencil_discard);
+    BeginRenderPassImpl(dc.framebuffer, renderpass, clear_values.data(), count);
 }
 
 bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
@@ -422,11 +415,12 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
         RealizeDeferredClear();
         return;
     }
-    const RenderPassBinding active{state.renderpass, state.framebuffer, state.framebuffer_ptr,
-                                   state.render_area, state.renderpass_load_variant};
-    const RenderPassBinding requested{framebuffer->RenderPass(), framebuffer->Handle(), framebuffer,
-                                      framebuffer->RenderArea(), false};
-    if (CanContinueRenderPass(active, requested)) {
+    const VkRenderPass renderpass = framebuffer->RenderPass();
+    const VkFramebuffer framebuffer_handle = framebuffer->Handle();
+    const VkExtent2D render_area = framebuffer->RenderArea();
+    if (renderpass == state.renderpass && framebuffer_handle == state.framebuffer &&
+        render_area.width == state.render_area.width &&
+        render_area.height == state.render_area.height) {
         return;
     }
     if (state.renderpass) {
@@ -434,7 +428,7 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
     }
     // Ends any active pass and realizes a deferred clear
     EndRenderPass();
-    BeginRenderPassImpl(framebuffer, framebuffer->RenderPass(), nullptr, 0);
+    BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0);
 }
 
 void Scheduler::RequestOutsideRenderPassOperationContext(std::source_location location) {
@@ -487,55 +481,6 @@ bool Scheduler::UpdateDescriptorBufferChunk(u32 descriptor_chunk) {
     }
     state.descriptor_buffer_bound = true;
     state.descriptor_buffer_chunk = descriptor_chunk;
-    return true;
-}
-
-bool Scheduler::UpdateDescriptorBufferOffsets(VkPipelineLayout layout, u32 descriptor_chunk,
-                                              VkDeviceSize offset) {
-    if (state.descriptor_offsets_valid && state.descriptor_offsets_layout == layout &&
-        state.descriptor_offsets_chunk == descriptor_chunk &&
-        state.descriptor_offsets_offset == offset) {
-        return false;
-    }
-    state.descriptor_offsets_valid = true;
-    state.descriptor_offsets_layout = layout;
-    state.descriptor_offsets_chunk = descriptor_chunk;
-    state.descriptor_offsets_offset = offset;
-    return true;
-}
-
-bool Scheduler::UpdatePushConstants(VkPipelineLayout layout, VkShaderStageFlags stages, u32 offset,
-                                    const void* data, u32 size) {
-    const auto* bytes = static_cast<const u8*>(data);
-    auto& memos = state.push_constant_memos;
-    for (const auto& memo : memos) {
-        if (memo.valid && memo.layout == layout && memo.stages == stages && memo.offset == offset &&
-            memo.size == size && std::equal(bytes, bytes + size, memo.data.begin())) {
-            return false;
-        }
-    }
-    // These words land in the command buffer: any memo whose range they overwrite is stale.
-    for (auto& memo : memos) {
-        if (memo.valid && memo.offset < offset + size && offset < memo.offset + memo.size) {
-            memo.valid = false;
-        }
-    }
-    if (size > State::PushConstantMemo::DATA_SIZE) {
-        return true;
-    }
-    State::PushConstantMemo* slot = nullptr;
-    for (auto& memo : memos) {
-        if (!memo.valid) {
-            slot = &memo;
-            break;
-        }
-    }
-    if (slot == nullptr) {
-        slot = &memos[state.push_constant_rotation++ % memos.size()];
-    }
-    *slot = State::PushConstantMemo{
-        .layout = layout, .stages = stages, .offset = offset, .size = size, .valid = true};
-    std::copy_n(bytes, size, slot->data.begin());
     return true;
 }
 
@@ -900,10 +845,6 @@ void Scheduler::InvalidateState() {
     state.graphics_pipeline = nullptr;
     state.rescaling_defined = false;
     state.descriptor_buffer_bound = false;
-    state.descriptor_offsets_valid = false;
-    for (auto& memo : state.push_constant_memos) {
-        memo.valid = false;
-    }
     state_tracker.InvalidateCommandBufferState();
 }
 
@@ -993,13 +934,6 @@ void Scheduler::EndRenderPass()
         });
 
         state.renderpass = VkRenderPass{};
-        state.framebuffer_ptr = nullptr;
-        state.renderpass_load_variant = false;
-        // The memo describes this pass's command buffer only: blits and dispatches outside it
-        // push their own constants without going through the memo.
-        for (auto& memo : state.push_constant_memos) {
-            memo.valid = false;
-        }
         num_renderpass_images = 0;
     }
 
