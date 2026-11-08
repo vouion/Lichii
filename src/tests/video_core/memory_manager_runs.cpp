@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
 #include <exception>
+#include <iostream>
 #include <limits>
 #include <random>
 #include <catch2/catch_test_macros.hpp>
@@ -189,4 +191,87 @@ TEST_CASE("MaxContinuousRange from the mapping runs matches the page walk", "[me
         check(address_space_end - back, back);
         check(address_space_end - back, back + 1);
     }
+}
+
+TEST_CASE("GPU memory read CPU benchmark", "[.][memory_read_bench]") {
+    // A draw reads its constant-buffer and handle words through MemoryManager::Read, which pays
+    // the page-table translation (GpuToCpuAddress plus the device manager's own page lookup) on
+    // every call unless the per-thread page memo holds the page. "walk" is the translation the
+    // memo replaces; "memo" is the memo's hit path, both ending in the same memcpy. The gap is
+    // what the memo saves per read. Fastest of five runs each, so scheduling noise cannot make
+    // the slower path look faster.
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    NullRasterizer rasterizer;
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31, 16};
+    memory.BindRasterizer(&rasterizer);
+    constexpr GPUVAddr window = 0x4000'0000;
+    constexpr u64 big_page = 1ULL << 16;
+    REQUIRE(memory.Map(window, 0x1000'0000, 16 * big_page, Tegra::PTEKind::PITCH, true) ==
+            window);
+    constexpr size_t reads = 5'000'000;
+    constexpr size_t trials = 5;
+    alignas(16) const u8 dummy[8]{1, 2, 3, 4, 5, 6, 7, 8};
+    const auto fastest = [&](auto&& read) {
+        double best = std::numeric_limits<double>::max();
+        for (size_t trial = 0; trial < trials; ++trial) {
+            const auto start = std::chrono::steady_clock::now();
+            const u64 checksum = read();
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            CHECK(checksum != 0);
+            best = (std::min)(best, std::chrono::duration<double, std::nano>(elapsed).count() /
+                                        reads);
+        }
+        return best;
+    };
+    const double walk_ns = fastest([&] {
+        u64 checksum{};
+        for (size_t index = 0; index < reads; ++index) {
+            const GPUVAddr address = window + (index % 8) * 0x1000;
+            const auto device_address = memory.GpuToCpuAddress(address);
+            const u8* host =
+                device_address ? device_memory.GetPointer<u8>(*device_address) : nullptr;
+            u32 value;
+            std::memcpy(&value, host ? host : dummy, sizeof(value));
+            checksum += value;
+        }
+        return checksum;
+    });
+    // The memo's hit sequence as MemoryManager::Read runs it, seeded once over the same eight
+    // pages the loop walks, so every read hits.
+    struct PageMemo {
+        GPUVAddr page{};
+        u64 serial{};
+        std::size_t id{};
+        const u8* host{};
+    };
+    std::array<PageMemo, 8> memos{};
+    for (size_t slot = 0; slot < memos.size(); ++slot) {
+        const GPUVAddr page = window + slot * 0x1000;
+        memos[slot] = PageMemo{page, memory.MapSerial(), memory.GetID(),
+                               memory.GetPointer(page)};
+    }
+    const double memo_ns = fastest([&] {
+        u64 checksum{};
+        for (size_t index = 0; index < reads; ++index) {
+            const GPUVAddr address = window + (index % 8) * 0x1000;
+            const GPUVAddr page = address & ~GPUVAddr{0xFFF};
+            PageMemo& memo = memos[(page >> 12) & 7];
+            if (memo.page != page || memo.serial != memory.MapSerial() ||
+                memo.id != memory.GetID()) {
+                memo = PageMemo{page, memory.MapSerial(), memory.GetID(),
+                                memory.GetPointer(page)};
+            }
+            u32 value;
+            std::memcpy(&value, memo.host ? memo.host + (address & 0xFFF) : dummy,
+                        sizeof(value));
+            checksum += value;
+        }
+        return checksum;
+    });
+    std::cout << "GPU memory Read<u32>: walk_ns=" << walk_ns << " memo_ns=" << memo_ns
+              << " saved_ns=" << walk_ns - memo_ns
+              << " (fastest of 5, CPU only, not gameplay FPS)\n";
 }

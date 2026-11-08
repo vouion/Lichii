@@ -1367,11 +1367,26 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // Native programs keep tables next to their code in a 64 KiB bank read with indirect offsets
     // (Splatoon Raiders: the dialogue box corners in c1). Writes to that memory can go unnoticed by
     // the memory tracker, leaving stale host contents, so upload such a bank again once per frame.
-    if (has_host_buffer && (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000 &&
-        size != 0 && gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
-        (Nx2Perf::Verify() || !native_indirect_uniforms_this_frame.contains(device_addr)) &&
-        !memory_tracker.IsRegionGpuModified(device_addr, size) &&
-        native_indirect_uniforms_this_frame.insert(device_addr).second) {
+    const bool native_bank_candidate =
+        has_host_buffer && (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000 &&
+        size != 0 && gpu_memory != nullptr && gpu_memory->UsesNativeTiling();
+    bool upload_native_bank = false;
+    if (native_bank_candidate) {
+        // The set lookup and the tracker walk below are per-bind work for a per-frame upload: a
+        // slot that already uploaded this address this frame repeats exactly what the set's own
+        // insert would have skipped, so remember (address, frame) and skip the whole condition.
+        // Anything else - a different address, another frame, a slot that did not upload yet -
+        // evaluates the condition in full, as before.
+        auto& memo = channel_state->native_bank_memo[stage][index];
+        if (!(memo.addr == device_addr && memo.frame == frame_tick) &&
+            (Nx2Perf::Verify() || !native_indirect_uniforms_this_frame.contains(device_addr)) &&
+            !memory_tracker.IsRegionGpuModified(device_addr, size) &&
+            native_indirect_uniforms_this_frame.insert(device_addr).second) {
+            memo = BufferCacheChannelInfo::NativeBankMemo{device_addr, frame_tick};
+            upload_native_bank = true;
+        }
+    }
+    if (upload_native_bank) {
         // The bank size is only an upper limit: stop at the end of the mapped memory.
         u64 mapped_size = 0;
         while (mapped_size < size &&

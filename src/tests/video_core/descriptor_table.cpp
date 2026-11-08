@@ -374,6 +374,63 @@ TEST_CASE("Descriptor Debug poisoning touches only the current addressable range
     REQUIRE(table.Read(memory, 127).second);
 }
 
+TEST_CASE("Descriptor read CPU benchmark", "[.][descriptor_table_read_bench]") {
+    // Production-shaped memory: a real host buffer behind GetPointer plus the MapSerial/GetID
+    // pair the page translation memo keys on, so Read takes the path it takes in a draw.
+    // "repeat" binds the same entries over and over (the steady state a draw sees: a TIC bank
+    // that did not move) and now returns after the first observation; "changed" rewrites the
+    // entry before every read, which forces the full torn-guard path the fast path skips. The
+    // gap between them is what the fast path saves per descriptor read.
+    struct Memory {
+        std::vector<Tegra::Texture::TICEntry> descriptors;
+        u64 serial{1};
+        const u8* GetPointer(GPUVAddr address) const {
+            return reinterpret_cast<const u8*>(descriptors.data()) + address - 0x1000;
+        }
+        u64 MapSerial() const {
+            return serial;
+        }
+        std::size_t GetID() const {
+            return 1;
+        }
+        void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
+            std::memcpy(output, GetPointer(address), size);
+        }
+        void ReadBlock(GPUVAddr address, void* output, size_t size) const {
+            ReadBlockUnsafe(address, output, size);
+        }
+    };
+    constexpr u32 num_descriptors = 1024;
+    constexpr size_t reads = 2'000'000;
+    Memory memory{std::vector<Tegra::Texture::TICEntry>(num_descriptors)};
+    for (u32 index = 0; index < num_descriptors; ++index) {
+        memory.descriptors[index].raw = {index, index + 1, index + 2, index + 3};
+    }
+    VideoCommon::DescriptorTable<Tegra::Texture::TICEntry, Common::SlotId> table;
+    REQUIRE(table.Synchronize(0x1000, num_descriptors - 1));
+    const auto measure = [&](bool mutate) {
+        u64 checksum{};
+        const auto start = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < reads; ++i) {
+            const u32 index = static_cast<u32>(i) & (num_descriptors - 1);
+            if (mutate) {
+                memory.descriptors[index].raw[0] ^= static_cast<u32>(i);
+            }
+            const auto [descriptor, changed] = table.Read(memory, index);
+            checksum += descriptor.raw[0] + changed;
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        return std::pair{std::chrono::duration<double, std::nano>(elapsed).count() / reads,
+                         checksum};
+    };
+    const auto [repeat_ns, repeat_checksum] = measure(false);
+    const auto [changed_ns, changed_checksum] = measure(true);
+    REQUIRE(changed_checksum > 0);
+    std::cout << "Descriptor TIC read: repeat_ns=" << repeat_ns
+              << " changed_ns=" << changed_ns << " saved_ns=" << changed_ns - repeat_ns
+              << " (median-free single run, CPU only, not gameplay FPS)\n";
+}
+
 TEST_CASE("Descriptor ID lookup CPU benchmark", "[.][descriptor_lookup_bench]") {
     using Descriptor = Tegra::Texture::TICEntry;
     using Id = Common::SlotId;
