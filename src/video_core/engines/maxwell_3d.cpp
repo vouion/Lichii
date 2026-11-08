@@ -1639,7 +1639,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     // the front range-notes (uploads, reports, semaphores), so a GPU write landing through a
     // download can leave a stale table served; and the 8k-entry note-ring scan per read is pure
     // overhead for tables that change every frame (this title measured the cache a negative).
-    static const bool macro_read_cache_on = std::getenv("EDEN_NX2_MACRO_READ_CACHE") == nullptr;
+    static const bool macro_read_cache_on = std::getenv("EDEN_NX2_MACRO_READ_CACHE") != nullptr;
     if (macro_read_cache_on && words <= 256) {
         MacroReadEntry& cached = macro_read_cache[(source >> 7) & 31];
         if (cached.source == source && cached.words == words && cached.captured_at != 0 &&

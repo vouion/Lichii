@@ -1027,7 +1027,7 @@ void BufferCache<P>::PopAsyncBuffers() {
             // with a newer queued GPU write still in flight loses its mark and the fast paths read
             // it unflushed.
             static const bool clear_gpu_written =
-                std::getenv("EDEN_NX2_CLEAR_GPU_WRITTEN") == nullptr;
+                std::getenv("EDEN_NX2_CLEAR_GPU_WRITTEN") != nullptr;
             if (clear_gpu_written) {
                 Tegra::Nx2ClearGpuWritten(start, end - start);
             }
